@@ -12,3 +12,6 @@ settings.local.json
 
 # local machine state lives under $HOME/.keybridge, never in-repo:
 # credentials.json, config.json, keybridge-se-signer, keybridge-webshell
+
+# npm artifacts (pnpm repo; the plugin launchers npm-install only inside the plugin cache)
+package-lock.json

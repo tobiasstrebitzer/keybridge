@@ -1,6 +1,6 @@
 {
   "name": "keybridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Safe WebAuthn bridge for npm publishing from agents: the agent initiates, the human approves via Touch ID - the ceremony runs in an invisible windowless WKWebView.",
   "private": true,
   "license": "MIT",
