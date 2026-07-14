@@ -89,6 +89,11 @@ export const NpmPublishAction = createAction({
           sendProgress(phase)
         }
       },
+    }).catch((e: unknown) => {
+      // The tool result only carries the message - fold npm's stderr in so
+      // failures are diagnosable without hunting for server logs.
+      if (e instanceof PublishError) e.message = e.fullMessage()
+      throw e
     })
 
     return {

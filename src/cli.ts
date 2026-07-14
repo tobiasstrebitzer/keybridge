@@ -33,6 +33,12 @@ let presenterChoice: PresenterName | undefined
 const npmArgs: string[] = []
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i]!
+  // Intercept help before the `--` separator: forwarding it would make npm
+  // print its help and "succeed" without publishing anything.
+  if (a === '--help' || a === '-h') {
+    console.error('usage: keybridge <setup|publish|login> [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm args...]')
+    process.exit(0)
+  }
   if (a === '--poll-timeout') pollTimeoutMs = Number(rest[++i]) * 1000
   else if (a.startsWith('--poll-timeout=')) pollTimeoutMs = Number(a.split('=')[1]) * 1000
   else if (a === '--presenter') presenterChoice = rest[++i] as PresenterName
@@ -64,9 +70,16 @@ try {
     console.error('✓ npm login complete')
   } else {
     const outcome = await publishWithWebAuth({ npmArgs, presenter, pollTimeoutMs, onStatus })
-    const id = outcome.result?.id ?? ''
-    console.error(`✓ published ${id}${outcome.usedWebAuth ? ' (via WebAuthn hand-off)' : ''}`)
-    console.log(JSON.stringify(outcome.result, null, 2))
+    const id = outcome.result?.id ?? outcome.result?.name
+    if (!id) {
+      // npm exited 0 without a publish result (e.g. a forwarded flag made it
+      // print help) - do not claim success for a publish that never happened.
+      console.error('✗ npm exited without a publish result - nothing was published')
+      process.exitCode = 1
+    } else {
+      console.error(`✓ published ${id}${outcome.usedWebAuth ? ' (via WebAuthn hand-off)' : ''}`)
+      console.log(JSON.stringify(outcome.result, null, 2))
+    }
   }
 } catch (e) {
   if (e instanceof PublishError) {

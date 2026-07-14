@@ -3,7 +3,7 @@
 // batch of publishes (each publish still needs its own touch).
 import { createAction, type Logger } from '@silkweave/core'
 import { z } from 'zod/v4'
-import { loginWithWebAuth, type StatusEvent } from '../engine.ts'
+import { loginWithWebAuth, PublishError, type StatusEvent } from '../engine.ts'
 import { notifyHuman } from '../presenters/browser.ts'
 import { selectPresenter } from '../presenters/select.ts'
 
@@ -45,6 +45,10 @@ export const NpmLoginAction = createAction({
         }
         logger?.progress({ progress: ++progress, message: phase === 'awaiting-human' ? `Waiting for WebAuthn verification at ${authUrl}` : phase })
       },
+    }).catch((e: unknown) => {
+      // The tool result only carries the message - fold npm's stderr in.
+      if (e instanceof PublishError) e.message = e.fullMessage()
+      throw e
     })
     return { registry: result.registry, npmrc: result.npmrc }
   },

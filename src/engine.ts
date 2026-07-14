@@ -71,6 +71,16 @@ export class PublishError extends Error {
     this.stderr = stderr
     this.json = json
   }
+
+  /**
+   * Message with the npm stderr tail folded in - for surfaces that only show
+   * `message` (MCP tool results), where a bare npm summary like "command
+   * failed" is undiagnosable. The CLI prints stderr separately instead.
+   */
+  fullMessage (): string {
+    const detail = (this.stderr ?? '').trim()
+    return detail ? `${this.message}\n${detail.slice(-800)}` : this.message
+  }
 }
 
 const parseJson = (text: string): NpmJson | null => {
