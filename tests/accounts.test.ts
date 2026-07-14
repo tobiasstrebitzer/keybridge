@@ -38,6 +38,8 @@ case "$1" in
       test-*) echo "npm error invalid token" >&2; exit 1 ;;
     esac
     if [ -n "$FAKE_WHOAMI" ]; then echo "$FAKE_WHOAMI"; exit 0; else echo "ENEEDAUTH" >&2; exit 1; fi ;;
+  profile)
+    if [ -n "$FAKE_TFA" ]; then echo "{\\"tfa\\":{\\"pending\\":null,\\"mode\\":\\"$FAKE_TFA\\"}}"; exit 0; else exit 1; fi ;;
   *) exit 1 ;;
 esac
 `)
@@ -321,4 +323,24 @@ test('accountsStatus reports divergences as warnings', async () => {
   asUser(null)
   const expired = await accountsStatus({ npmBin: fakeNpm, registry: 'https://registry.npmjs.org/' })
   assert.ok(expired.warnings.some((w) => w.includes('re-authenticates as alice')))
+})
+
+test('auth-only 2FA mode is surfaced as a loud warning (the gate is bypassed)', async (t) => {
+  resetState()
+  asUser('alice')
+  process.env.FAKE_TFA = 'auth-only'
+  t.after(() => { delete process.env.FAKE_TFA })
+
+  const { twoFactorMode } = await import('../src/accounts.ts')
+  assert.equal(await twoFactorMode({ npmBin: fakeNpm }), 'auth-only')
+
+  const status = await accountsStatus({ npmBin: fakeNpm, registry: 'https://registry.npmjs.org/' })
+  assert.equal(status.twoFactorMode, 'auth-only')
+  assert.ok(status.warnings.some((w) => w.includes('auth-only') && w.includes('bypassed')))
+
+  // auth-and-writes: the mode keybridge is built for - no warning.
+  process.env.FAKE_TFA = 'auth-and-writes'
+  const good = await accountsStatus({ npmBin: fakeNpm, registry: 'https://registry.npmjs.org/' })
+  assert.equal(good.twoFactorMode, 'auth-and-writes')
+  assert.ok(!good.warnings.some((w) => w.includes('auth-only')))
 })

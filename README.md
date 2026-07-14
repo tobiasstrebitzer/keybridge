@@ -180,7 +180,7 @@ chores, or keep a recovery code / second passkey for regular-browser access.
 ```json
 {
   "mcpServers": {
-    "keybridge": { "command": "npx", "args": ["keybridge-mcp"] }
+    "keybridge": { "command": "npx", "args": ["-y", "-p", "keybridge", "keybridge-mcp"] }
   }
 }
 ```
@@ -240,6 +240,15 @@ Two independent gates:
    your enrolled authenticator, and keybridge's authenticator only signs after
    Touch ID. No touch, no publish. This gate cannot be whitelisted, delegated,
    or scripted away - it is the real security boundary.
+
+> [!WARNING]
+> Gate 2 only exists when your npm account's 2FA level is
+> **"auth-and-writes"** (require 2FA for writes). On **"auth-only"** accounts
+> npm publishes with the session token alone - no touch, no ceremony, and
+> nothing keybridge can do about it server-side. keybridge detects this and
+> warns on `keybridge status`, `NpmStatus`, and every publish; switch the
+> level under *npmjs.com → Settings → Two-Factor Authentication*
+> (`keybridge open` takes you there).
 
 Local state lives in `~/.keybridge/`: `credentials.json` (public key metadata;
 private keys stay in the Secure Enclave), `accounts.json` (npm username →

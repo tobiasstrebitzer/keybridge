@@ -17,6 +17,8 @@ const output = z.object({
   activeAccount: z.string().nullable()
     .describe('Last account confirmed by a keybridge login - the identity an automatic re-login would restore when the token expired.'),
   registry: z.string().describe('The registry the report applies to.'),
+  twoFactorMode: z.string().nullable()
+    .describe('Current account\'s npm 2FA mode. "auth-and-writes" = every publish requires the human\'s touch (what keybridge is built for). "auth-only" = the token alone can publish - keybridge\'s approval gate is BYPASSED; tell the user to switch modes. Null = unknown/logged out.'),
   accounts: z.array(z.object({
     username: z.string(),
     current: z.boolean().describe('True for the `npm whoami` account.'),
@@ -51,6 +53,7 @@ export const NpmStatusAction = createAction({
       user: status.user,
       activeAccount: status.active,
       registry: status.registry,
+      twoFactorMode: status.twoFactorMode,
       accounts: status.accounts.map((a) => ({
         username: a.username,
         current: a.current,

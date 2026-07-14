@@ -89,6 +89,26 @@ export async function whoami ({ cwd, npmBin = 'npm', npmArgs = [] }: IdentityOpt
   }
 }
 
+/**
+ * The account's npm 2FA mode: 'auth-and-writes' (every publish demands a
+ * fresh WebAuthn assertion - the mode keybridge is built for) or 'auth-only'
+ * (the session token alone can publish - keybridge's human gate is silently
+ * BYPASSED). Null when unknown (logged out, or a registry without profile
+ * support).
+ */
+export async function twoFactorMode (
+  { cwd, npmBin = 'npm', npmArgs = [], env }: IdentityOptions & { env?: NodeJS.ProcessEnv } = {},
+): Promise<string | null> {
+  try {
+    const res = await runNpm(['profile', 'get', '--json', ...configFlags(npmArgs)], { cwd, npmBin, env })
+    if (res.code !== 0) return null
+    const tfa = (res.json as { tfa?: { mode?: string | null } } | null)?.tfa
+    return tfa?.mode ?? null
+  } catch {
+    return null
+  }
+}
+
 /** Who a SPECIFIC token authenticates as - checked via an env override, so
  * nothing on disk changes. Null when the token is dead. */
 export async function whoamiWithToken (
@@ -373,6 +393,9 @@ export interface AccountsStatus {
   user: string | null
   active: string | null
   registry: string
+  /** Current account's npm 2FA mode ('auth-and-writes' | 'auth-only' | null).
+   * 'auth-only' means publishes skip the WebAuthn ceremony entirely. */
+  twoFactorMode: string | null
   accounts: AccountStatusEntry[]
   /** Keys enrolled before username stamping existed - they link to the
    * current user automatically on the next successful login. */
@@ -384,6 +407,7 @@ export interface AccountsStatus {
  * credentials - with explicit warnings for every known divergence. */
 export async function accountsStatus (opts: IdentityOptions & { registry?: string } = {}): Promise<AccountsStatus> {
   const user = await whoami(opts)
+  const tfaMode = user ? await twoFactorMode(opts) : null
   const registry = opts.registry
     ?? await resolveRegistry(opts).catch(() => 'https://registry.npmjs.org/')
   const rpId = rpIdForRegistry(registry) ?? 'www.npmjs.com'
@@ -408,6 +432,11 @@ export async function accountsStatus (opts: IdentityOptions & { registry?: strin
   const unlinkedKeys = creds.filter((c) => !c.username).length
 
   const warnings: string[] = []
+  if (user && tfaMode === 'auth-only') {
+    warnings.push(
+      `account 2FA mode is "auth-only" - npm publishes with the session token ALONE, no Touch ID / security key asked. ` +
+      `keybridge's human approval gate is bypassed! Switch to "auth-and-writes": \`keybridge open https://www.npmjs.com/settings/${user}/tfa\``)
+  }
   if (!user) {
     warnings.push(file.active
       ? `not logged in to npm (token missing or expired) - \`keybridge login\` re-authenticates as ${file.active}`
@@ -428,5 +457,5 @@ export async function accountsStatus (opts: IdentityOptions & { registry?: strin
     warnings.push(`${unlinkedKeys} enrolled security ${unlinkedKeys === 1 ? 'key is' : 'keys are'} not linked to an account yet - linking happens automatically on the next login`)
   }
 
-  return { user, active: file.active, registry, accounts, unlinkedKeys, warnings }
+  return { user, active: file.active, registry, twoFactorMode: tfaMode, accounts, unlinkedKeys, warnings }
 }

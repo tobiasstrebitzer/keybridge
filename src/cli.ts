@@ -22,7 +22,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import {
   accountsStatus, assertSecurityKeyFor, bindAccount, bindAfterLogin, candidateStoreId,
   dropAccount, getActive, loginAs, resolveMediation, resolvePublishIdentity,
-  whoami, whoamiWithToken, type Mediation,
+  twoFactorMode, whoami, whoamiWithToken, type Mediation,
 } from './accounts.ts'
 import { deleteToken, getToken, listTokenMeta, saveToken } from './tokens.ts'
 import { publishWithWebAuth, resolveRegistry, runNpm, PublishError, type StatusEvent } from './engine.ts'
@@ -63,6 +63,7 @@ if (command === 'status' || command === 'whoami') {
   console.log(`npm CLI session : ${status.user ?? '(not logged in)'}`)
   console.log(`active account  : ${status.active ?? '(none)'}`)
   console.log(`registry        : ${status.registry}`)
+  if (status.twoFactorMode) console.log(`2FA mode        : ${status.twoFactorMode}${status.twoFactorMode === 'auth-only' ? '  ⚠ publishes skip Touch ID!' : ''}`)
   if (status.accounts.length > 0) {
     console.log('\naccounts:')
     for (const a of status.accounts) {
@@ -279,6 +280,16 @@ try {
         const registry = mediation?.registry
           ?? await resolveRegistry({ npmArgs }).catch(() => 'https://registry.npmjs.org/')
         assertSecurityKeyFor(publishUser, registry)
+      }
+      // auth-only 2FA = npm publishes with the token alone; the human gate
+      // keybridge exists for never fires. Warn loudly (mediated publishes
+      // check the mediated account's own token/session).
+      if (!npmArgs.includes('--dry-run')) {
+        const mode = await twoFactorMode(mediation ? { npmArgs, env: mediation.env } : { npmArgs })
+        if (mode === 'auth-only') {
+          console.error('⚠ 2FA mode is "auth-only" - npm will NOT ask for Touch ID on this publish (the human gate is bypassed)')
+          console.error(`  → fix: \`keybridge open https://www.npmjs.com/settings/${publishUser}/tfa\` and set "Require two-factor... for writes"`)
+        }
       }
     } else {
       console.error(`· not logged in - a web login will run first${identity.active ? ` (last account: ${identity.active})` : ''}`)
