@@ -123,7 +123,8 @@ export async function handleGet (options: GetOptions, origin: string, signer: Si
   const authData = authenticatorData({ rpId, flags: FLAG_UP | FLAG_UV, signCount })
   const clientDataHash = createHash('sha256').update(cdj).digest()
   const message = Buffer.concat([authData, clientDataHash])
-  const signature = await signer.sign(record, message, `Authenticate to ${rpId} (keybridge)`)
+  // Touch ID dialog reads: “"KeyBridge Agent" is trying to <reason>.”
+  const signature = await signer.sign(record, message, `authenticate to ${rpId}`)
 
   return {
     id: record.credId,

@@ -1,0 +1,91 @@
+<svg width="1200" height="560" viewBox="0 0 1200 560" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- keybridge teaser (draft): the login sheet + the Touch ID gate -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="560" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0b0f14"/>
+      <stop offset="1" stop-color="#131a22"/>
+    </linearGradient>
+    <linearGradient id="fp" x1="0" y1="0" x2="88" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f472b6"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+    <linearGradient id="npmbar" x1="0" y1="0" x2="360" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="0.5" stop-color="#ef4444"/>
+      <stop offset="1" stop-color="#d946ef"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="560" fill="url(#bg)"/>
+
+  <!-- ambient glow -->
+  <circle cx="920" cy="120" r="260" fill="#60a5fa" opacity="0.05"/>
+  <circle cx="260" cy="470" r="240" fill="#d946ef" opacity="0.05"/>
+
+  <!-- ============ the keybridge sheet (npm dark login, compact) ============ -->
+  <g filter="url(#soft)">
+    <rect x="140" y="60" width="360" height="440" rx="18" fill="#1a1a1a" stroke="#2e2e2e"/>
+    <rect x="140" y="60" width="360" height="6" rx="3" fill="url(#npmbar)"/>
+
+    <!-- npm wordmark -->
+    <rect x="280" y="98" width="80" height="30" fill="#cb3837"/>
+    <text x="320" y="120" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" font-weight="700" fill="#ffffff" text-anchor="middle">npm</text>
+
+    <text x="176" y="182" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="26" font-weight="600" fill="#f5f5f5">Sign In</text>
+    <line x1="176" y1="200" x2="464" y2="200" stroke="#333333"/>
+
+    <!-- username: prefilled by keybridge -->
+    <text x="176" y="238" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="15" font-weight="600" fill="#d4d4d4">Username</text>
+    <rect x="176" y="250" width="288" height="44" rx="8" fill="#111111" stroke="#3a3a3a"/>
+    <text x="192" y="278" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="16" fill="#e5e5e5">tstrebitzer</text>
+
+    <!-- password: focused, waiting for the human -->
+    <text x="176" y="330" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="15" font-weight="600" fill="#d4d4d4">Password</text>
+    <rect x="176" y="342" width="288" height="44" rx="8" fill="#111111" stroke="#60a5fa" stroke-width="2"/>
+    <rect x="193" y="358" width="2.5" height="14" fill="#60a5fa">
+      <animate attributeName="opacity" values="1;1;0;0" dur="1.2s" repeatCount="indefinite"/>
+    </rect>
+
+    <rect x="176" y="414" width="288" height="46" rx="8" fill="#cb3837"/>
+    <text x="320" y="443" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="600" fill="#ffffff" text-anchor="middle">Sign In</text>
+  </g>
+
+  <!-- ============ flow arrow ============ -->
+  <g stroke="#4b5563" stroke-width="2.5" stroke-dasharray="2 7" stroke-linecap="round">
+    <path d="M 530 280 C 590 280 600 280 656 280"/>
+  </g>
+  <path d="M 654 272 L 670 280 L 654 288 Z" fill="#4b5563"/>
+
+  <!-- ============ macOS Touch ID dialog ============ -->
+  <g filter="url(#soft)">
+    <rect x="700" y="110" width="330" height="340" rx="22" fill="#28282a" stroke="#3d3d40"/>
+
+    <!-- fingerprint mark -->
+    <g transform="translate(821, 150)" stroke="url(#fp)" stroke-width="5" stroke-linecap="round" fill="none">
+      <path d="M 44 16 C 28 16 16 28 16 44 C 16 56 14 64 10 70"/>
+      <path d="M 44 30 C 36 30 30 36 30 44 C 30 56 27 66 22 73"/>
+      <path d="M 44 44 C 44 56 42 68 37 76"/>
+      <path d="M 58 36 C 58 33 52 30 44 30" opacity="0"/>
+      <path d="M 72 44 C 72 28 60 16 44 16" opacity="0"/>
+      <path d="M 58 44 C 58 58 56 70 52 78"/>
+      <path d="M 72 50 C 72 62 70 72 67 78"/>
+      <path d="M 71 33 C 66 22 56 16 44 16"/>
+    </g>
+
+    <text x="865" y="278" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="19" font-weight="700" fill="#f5f5f7" text-anchor="middle">KeyBridge Agent</text>
+    <text x="865" y="304" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="14" fill="#b9b9be" text-anchor="middle">is trying to authenticate to</text>
+    <text x="865" y="324" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="14" fill="#b9b9be" text-anchor="middle">www.npmjs.com</text>
+    <text x="865" y="360" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="14" font-weight="600" fill="#f5f5f7" text-anchor="middle">Touch ID to allow this.</text>
+
+    <line x1="700" y1="392" x2="1030" y2="392" stroke="#3d3d40"/>
+    <line x1="865" y1="392" x2="865" y2="450" stroke="#3d3d40"/>
+    <text x="782" y="427" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#5ea0f6" text-anchor="middle">Use Password…</text>
+    <text x="947" y="427" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#5ea0f6" text-anchor="middle">Cancel</text>
+  </g>
+
+  <!-- caption -->
+  <text x="600" y="536" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#6b7280" text-anchor="middle">the agent runs npm publish&#160;&#160;·&#160;&#160;you approve with Touch ID&#160;&#160;·&#160;&#160;nothing else is ever on screen</text>
+</svg>

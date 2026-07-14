@@ -1,8 +1,9 @@
 // `keybridge setup` - compile the native helpers into ~/.keybridge and pick a
 // signing backend. Safe to re-run anytime (existing credentials are untouched).
 //
-//   keybridge-se-signer   Secure Enclave P-256 signer (Touch ID gates every
-//                         signature). Built from native/SecureEnclaveSigner.swift.
+//   KeyBridge Agent       Secure Enclave P-256 signer (Touch ID gates every
+//                         signature; the binary name titles the Touch ID
+//                         dialog). Built from native/SecureEnclaveSigner.swift.
 //   keybridge-webshell    windowless WKWebView ceremony shell. Built from
 //                         native/WebShell.swift. (The webkit presenter also
 //                         rebuilds this on demand when the source is newer.)
@@ -12,7 +13,7 @@
 // keychain item, so no entitlement or provisioning profile is required - an
 // ad-hoc-signed binary works.
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,10 +48,11 @@ export function runSetup ({
   }
 
   // 1. Secure Enclave signer - determines the backend.
-  const helperPath = join(KB_DIR, 'keybridge-se-signer')
+  const helperPath = join(KB_DIR, 'KeyBridge Agent')
   if (!backend) {
     try {
       buildSwift(join(NATIVE_DIR, 'SecureEnclaveSigner.swift'), helperPath, log)
+      rmSync(join(KB_DIR, 'keybridge-se-signer'), { force: true }) // pre-rename leftover
       log('• probing Secure Enclave (creates a throwaway key) ...')
       if (!selfTestBackend(helperPath)) throw new Error('probe failed')
       backend = 'secure-enclave'

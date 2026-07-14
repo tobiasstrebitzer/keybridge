@@ -8,13 +8,19 @@
 //   FAKE_WEBAUTHN JSON {op, options, origin} - emitted as a webauthn event
 //                 (id 99) right after the first navigate command
 //   FAKE_LOG      file that every received command line is appended to
+//   FAKE_ARGV_LOG file the shell's argv is written to on startup (JSON array)
+//   FAKE_NAV_AFTER_EVALS  emit a nav event right after the Nth eval (page
+//                 chain simulation, e.g. /login -> /escalate/webauthn)
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
+
+if (process.env.FAKE_ARGV_LOG) appendFileSync(process.env.FAKE_ARGV_LOG, JSON.stringify(process.argv.slice(2)) + '\n')
 
 const evals = (process.env.FAKE_EVALS ?? '').split(',').filter(Boolean)
 const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\n')
 
 let navigated = false
+let evalCount = 0
 createInterface({ input: process.stdin }).on('line', (line) => {
   if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, line + '\n')
   let msg
@@ -24,7 +30,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     out({ event: 'nav', url: msg.url })
     if (process.env.FAKE_WEBAUTHN) out({ event: 'webauthn', id: 99, ...JSON.parse(process.env.FAKE_WEBAUTHN) })
   }
-  if (msg.cmd === 'eval') out({ event: 'eval-result', id: msg.id, value: evals.shift() ?? 'not-found' })
+  if (msg.cmd === 'eval') {
+    out({ event: 'eval-result', id: msg.id, value: evals.shift() ?? 'not-found' })
+    evalCount++
+    if (String(evalCount) === process.env.FAKE_NAV_AFTER_EVALS) {
+      out({ event: 'nav', url: 'https://www.npmjs.com/escalate/webauthn' })
+    }
+  }
   if (msg.cmd === 'close') process.exit(0)
 })
 

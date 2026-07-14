@@ -62,6 +62,10 @@ export class PublishError extends Error {
   stdout: string | undefined
   stderr: string | undefined
   json: NpmJson | null | undefined
+  /** Thrown by a presenter: the ceremony can never complete (e.g. ENOCRED in
+   * a hidden shell). The engine stops doneUrl polling immediately instead of
+   * waiting out the poll timeout. */
+  fatal?: boolean
 
   constructor (message: string, { code = 'EPUBLISH', stdout, stderr, json }: PublishErrorDetail = {}) {
     super(message)
@@ -121,12 +125,13 @@ export function runNpm (args: string[], { cwd, npmBin = 'npm', env }: RunNpmOpti
 // no token is configured - doneUrl polling then runs unauthenticated.
 export async function getAuthToken (
   registryLikeUrl: string,
-  { cwd = process.cwd(), npmArgs = [] }: { cwd?: string, npmArgs?: string[] } = {},
+  { cwd = process.cwd(), npmArgs = [], env = process.env }:
+  { cwd?: string, npmArgs?: string[], env?: NodeJS.ProcessEnv } = {},
 ): Promise<string | null> {
   const { host } = new URL(registryLikeUrl)
   const key = `//${host}/:_authToken`
 
-  const fromEnv = process.env[`npm_config_${key}`]
+  const fromEnv = env[`npm_config_${key}`]
   if (fromEnv) return fromEnv
 
   let userconfig = join(homedir(), '.npmrc')
@@ -185,6 +190,10 @@ export interface LoginOptions {
   onStatus?: OnStatus
   pollTimeoutMs?: number
   fetchImpl?: FetchLike
+  /** Awaited after the fresh token is persisted - the identity layer uses
+   * this to bind the session to whatever `npm whoami` now reports and to
+   * stash the token in the per-account vault. */
+  afterLogin?: (login: { token: string, registry: string, npmrc: string }) => void | Promise<void>
 }
 
 // Web-based login (what `npm login` does since Dec 2025 - yields a session
@@ -199,7 +208,8 @@ export async function loginWithWebAuth ({
   onStatus = () => {},
   pollTimeoutMs = 300_000,
   fetchImpl = fetch,
-}: LoginOptions = {}): Promise<{ registry: string, npmrc: string }> {
+  afterLogin,
+}: LoginOptions = {}): Promise<{ registry: string, npmrc: string, token: string }> {
   if (!presenter) throw new TypeError('loginWithWebAuth requires a presenter')
   registry ??= await resolveRegistry({ cwd, npmBin, npmArgs })
   const res = await fetchImpl(`${registry.replace(/\/+$/, '')}/-/v1/login`, {
@@ -221,15 +231,20 @@ export async function loginWithWebAuth ({
 
   onStatus({ phase: 'awaiting-human', authUrl: loginUrl, purpose: 'login' })
   const presenterAbort = new AbortController()
+  const pollAbort = new AbortController()
   let presenterError: Error | null = null
   const presentation = Promise.resolve()
     .then(() => presenter({ authUrl: loginUrl, signal: presenterAbort.signal }))
-    .catch((e: Error) => { presenterError = e })
+    // Only a fatal presenter failure stops the poll: a non-fatal one (e.g.
+    // the browser fallback failing to open) still leaves the human able to
+    // complete the ceremony by visiting authUrl themselves.
+    .catch((e: Error) => { presenterError = e; if ((e as PublishError).fatal) pollAbort.abort() })
 
   let token: string
   try {
-    token = await pollDoneUrl(doneUrl, { timeoutMs: pollTimeoutMs, fetchImpl })
+    token = await pollDoneUrl(doneUrl, { timeoutMs: pollTimeoutMs, signal: pollAbort.signal, fetchImpl })
   } catch (e) {
+    if ((presenterError as PublishError | null)?.fatal) throw presenterError
     if (presenterError && e instanceof Error) e.message += ` (presenter also failed: ${(presenterError as Error).message})`
     throw e
   } finally {
@@ -239,7 +254,8 @@ export async function loginWithWebAuth ({
 
   const npmrc = writeAuthToken(registry, token, { npmArgs })
   onStatus({ phase: 'login-complete', npmrc })
-  return { registry, npmrc }
+  await afterLogin?.({ token, registry, npmrc })
+  return { registry, npmrc, token }
 }
 
 function readNpmrcKey (file: string, key: string): string | null {
@@ -268,7 +284,8 @@ function readNpmrcKey (file: string, key: string): string | null {
 export const isRedacted = (url: unknown): boolean => typeof url !== 'string' || url.includes('***')
 
 export async function resolveRegistry (
-  { cwd = process.cwd(), npmBin = 'npm', npmArgs = [] }: { cwd?: string, npmBin?: string, npmArgs?: string[] } = {},
+  { cwd = process.cwd(), npmBin = 'npm', npmArgs = [], env }:
+  { cwd?: string, npmBin?: string, npmArgs?: string[], env?: NodeJS.ProcessEnv } = {},
 ): Promise<string> {
   for (let i = 0; i < npmArgs.length; i++) {
     const a = npmArgs[i]!
@@ -282,7 +299,7 @@ export async function resolveRegistry (
   const cfgFlags = npmArgs.filter((a, i, arr) =>
     a.startsWith('--userconfig') || a.startsWith('--globalconfig') ||
     arr[i - 1] === '--userconfig' || arr[i - 1] === '--globalconfig')
-  const res = await runNpm(['config', 'get', 'registry', ...cfgFlags], { cwd, npmBin })
+  const res = await runNpm(['config', 'get', 'registry', ...cfgFlags], { cwd, npmBin, env })
   const value = res.stdout.trim()
   if (!value || value === 'undefined') throw new PublishError('could not resolve registry URL', { code: 'ECONFIG' })
   return value
@@ -360,6 +377,12 @@ export interface PublishOptions {
   /** how long to wait for the human */
   pollTimeoutMs?: number
   autoLogin?: boolean
+  /** Forwarded to the automatic web login (see LoginOptions.afterLogin). */
+  afterLogin?: LoginOptions['afterLogin']
+  /** Environment for every spawned npm (and token resolution). Mediated
+   * publishes inject another account's auth token here so the npmrc (and the
+   * CLI's identity) stays untouched. */
+  env?: NodeJS.ProcessEnv
 }
 
 export interface PublishOutcome {
@@ -377,11 +400,13 @@ export async function publishWithWebAuth ({
   onStatus = () => {},
   pollTimeoutMs = 300_000,
   autoLogin = true,
+  afterLogin,
+  env,
 }: PublishOptions = {}): Promise<PublishOutcome> {
   if (!presenter) throw new TypeError('publishWithWebAuth requires a presenter')
 
   onStatus({ phase: 'publish-attempt' })
-  const first = await runNpm(['publish', '--json', ...npmArgs], { cwd, npmBin })
+  const first = await runNpm(['publish', '--json', ...npmArgs], { cwd, npmBin, env })
   if (first.code === 0) {
     return { published: true, usedWebAuth: false, result: first.json }
   }
@@ -393,9 +418,9 @@ export async function publishWithWebAuth ({
   // will still demand its own 2FA verification - a second touch).
   if (autoLogin && (err?.code === 'ENEEDAUTH' || err?.code === 'E401')) {
     onStatus({ phase: 'login-required', code: err.code })
-    await loginWithWebAuth({ cwd, npmBin, npmArgs, presenter, onStatus, pollTimeoutMs })
+    await loginWithWebAuth({ cwd, npmBin, npmArgs, presenter, onStatus, pollTimeoutMs, afterLogin })
     return publishWithWebAuth({
-      npmArgs, cwd, npmBin, presenter, onStatus, pollTimeoutMs, autoLogin: false,
+      npmArgs, cwd, npmBin, presenter, onStatus, pollTimeoutMs, autoLogin: false, env,
     })
   }
 
@@ -413,8 +438,8 @@ export async function publishWithWebAuth ({
   if (isRedacted(authUrl) || isRedacted(doneUrl)) {
     // npm < 12: --json output redacted the session ids; mint our own session
     onStatus({ phase: 'minting-session' })
-    const registry = await resolveRegistry({ cwd, npmBin, npmArgs })
-    authToken = await getAuthToken(registry, { cwd, npmArgs })
+    const registry = await resolveRegistry({ cwd, npmBin, npmArgs, env })
+    authToken = await getAuthToken(registry, { cwd, npmArgs, env })
     let pkgName: string
     try {
       pkgName = (JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')) as { name: string }).name
@@ -423,21 +448,23 @@ export async function publishWithWebAuth ({
     }
     ;({ authUrl, doneUrl } = await mintWebAuthSession({ registry, pkgName, authToken }))
   } else {
-    authToken = await getAuthToken(doneUrl, { cwd, npmArgs })
+    authToken = await getAuthToken(doneUrl, { cwd, npmArgs, env })
   }
 
   onStatus({ phase: 'awaiting-human', authUrl, purpose: 'publish' })
 
   const presenterAbort = new AbortController()
+  const pollAbort = new AbortController()
   let presenterError: Error | null = null
   const presentation = Promise.resolve()
     .then(() => presenter({ authUrl: authUrl!, signal: presenterAbort.signal }))
-    .catch((e: Error) => { presenterError = e })
+    .catch((e: Error) => { presenterError = e; if ((e as PublishError).fatal) pollAbort.abort() })
 
   let otp: string
   try {
-    otp = await pollDoneUrl(doneUrl, { authToken, timeoutMs: pollTimeoutMs })
+    otp = await pollDoneUrl(doneUrl, { authToken, timeoutMs: pollTimeoutMs, signal: pollAbort.signal })
   } catch (e) {
+    if ((presenterError as PublishError | null)?.fatal) throw presenterError
     if (presenterError && e instanceof Error) e.message += ` (presenter also failed: ${(presenterError as Error).message})`
     throw e
   } finally {
@@ -446,7 +473,7 @@ export async function publishWithWebAuth ({
   }
 
   onStatus({ phase: 'publish-retry' })
-  const second = await runNpm(['publish', '--json', ...npmArgs, `--otp=${otp}`], { cwd, npmBin })
+  const second = await runNpm(['publish', '--json', ...npmArgs, `--otp=${otp}`], { cwd, npmBin, env })
   if (second.code === 0) {
     return { published: true, usedWebAuth: true, result: second.json }
   }

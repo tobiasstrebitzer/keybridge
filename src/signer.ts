@@ -18,6 +18,12 @@ import { homedir } from 'node:os'
 const KB_DIR = join(homedir(), '.keybridge')
 const STORE = join(KB_DIR, 'credentials.json')
 
+// The macOS Touch ID dialog titles itself with the calling binary's name, so
+// the helper is deliberately named for humans. Pre-rename installs still
+// have the old binary until `keybridge setup` runs again.
+const SE_HELPER = join(KB_DIR, 'KeyBridge Agent')
+const SE_HELPER_LEGACY = join(KB_DIR, 'keybridge-se-signer')
+
 const b64url = (buf: Buffer | Uint8Array): string => Buffer.from(buf).toString('base64url')
 const fromB64url = (s: string): Buffer => Buffer.from(s, 'base64url')
 
@@ -25,6 +31,9 @@ export interface CredentialRecord {
   credId: string
   rpId: string
   userHandle: string | null
+  /** npm username the credential belongs to. Stamped at enroll time; older
+   * records are healed after the next successful login (see accounts.ts). */
+  username?: string
   backend: string
   keyTag: string
   signCount: number
@@ -39,7 +48,12 @@ export interface Signer {
   sign (record: CredentialRecord, message: Buffer, reason: string): Promise<Buffer>
 }
 
-interface Store { credentials: CredentialRecord[] }
+interface Store {
+  credentials: CredentialRecord[]
+  /** The credential used by the most recent assertion - the identity layer
+   * consumes this after a login to bind the credential to `npm whoami`. */
+  lastAsserted?: { credId: string, at: string }
+}
 
 function loadStore (): Store {
   try { return JSON.parse(readFileSync(STORE, 'utf8')) as Store } catch { return { credentials: [] } }
@@ -60,7 +74,7 @@ export function resolveBackend (): string {
 
 export function createSigner ({
   backend = resolveBackend(),
-  helperPath = join(KB_DIR, 'keybridge-se-signer'),
+  helperPath = existsSync(SE_HELPER) || !existsSync(SE_HELPER_LEGACY) ? SE_HELPER : SE_HELPER_LEGACY,
 }: { backend?: string, helperPath?: string } = {}): Signer {
   const seCreate = (keyTag: string): { x: Buffer, y: Buffer } => {
     const out = execFileSync(helperPath, ['create', '--tag', keyTag], { encoding: 'utf8' })
@@ -120,6 +134,7 @@ export function createSigner ({
       }
       const record = candidates[candidates.length - 1]! // most recently registered
       record.signCount = (record.signCount ?? 0) + 1
+      store.lastAsserted = { credId: record.credId, at: new Date().toISOString() }
       saveStore(store)
       return { record, signCount: record.signCount }
     },
@@ -131,6 +146,38 @@ export function createSigner ({
       return createSign('SHA256').update(message).sign(record.privateKeyPem!)
     },
   }
+}
+
+export function listCredentials (): CredentialRecord[] {
+  return loadStore().credentials
+}
+
+/** Stamp the given credentials with the npm username they belong to. */
+export function stampUsername (credIds: string[], username: string): void {
+  const store = loadStore()
+  let changed = false
+  for (const record of store.credentials) {
+    if (credIds.includes(record.credId) && record.username !== username) {
+      record.username = username
+      changed = true
+    }
+  }
+  if (changed) saveStore(store)
+}
+
+/**
+ * Consume the last-asserted marker if it is fresh: returns the credId of the
+ * credential that answered the most recent ceremony and clears the marker
+ * (so a later login can never heal a stale assertion onto the wrong user).
+ */
+export function takeLastAsserted (withinMs = 15 * 60_000): string | null {
+  const store = loadStore()
+  const marker = store.lastAsserted
+  if (!marker) return null
+  delete store.lastAsserted
+  saveStore(store)
+  const age = Date.now() - Date.parse(marker.at)
+  return Number.isFinite(age) && age >= 0 && age <= withinMs ? marker.credId : null
 }
 
 export function selfTestBackend (helperPath: string): boolean {

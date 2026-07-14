@@ -13,20 +13,37 @@ One TS package (TS7 / oxlint / pnpm; dev runs native `.ts` under Node ≥ 22.18;
 survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
 
 - `src/engine.ts` - npm publish/login orchestration (`mintWebAuthSession`,
-  `pollDoneUrl`, `publishWithWebAuth`, `loginWithWebAuth`).
+  `pollDoneUrl`, `publishWithWebAuth`, `loginWithWebAuth`). Presenters can
+  throw a `PublishError` with `fatal = true` to abort doneUrl polling early.
+- `src/accounts.ts` - the identity layer. **`npm whoami` is the source of
+  truth**; `~/.keybridge/accounts.json` maps npm usernames to per-account
+  `WKWebsiteDataStore` UUIDs (browser profiles) + tracks the active account.
+  `loginAs` (login/switch; instant via vault token when one works),
+  `resolvePublishIdentity`, `resolveMediation` (publish as X without
+  switching - X's token as npm env override + X's profile; `autoLogin: false`
+  there, or a wrong-account token would land in npmrc), `assertSecurityKeyFor`
+  (ENOKEY fail-fast), `accountsStatus`, `bindAfterLogin` (post-login
+  self-healing, incl. stamping `username` onto the credential that asserted).
+- `src/tokens.ts` - per-account token vault (`~/.keybridge/tokens.json`,
+  0600): every login stores its ~12h web token; `keybridge token set` parks
+  long-lived granular tokens. Tokens are whoami-validated before every use
+  and evicted when dead.
 - `src/presenters/` - `webkit.ts` (the macOS default: drives the windowless
   WKWebView shell over JSON-lines stdio, answers WebAuthn ceremonies
-  in-process), `browser.ts` (open-default-browser fallback + `notifyHuman`),
-  `select.ts` (webkit → browser), `shared.ts` (`STATUS_SCRIPT` that auto-clicks
-  npm's "Use security key" button).
+  in-process), `browser.ts` (open-default-browser fallback), `select.ts`
+  (webkit → browser), `shared.ts` (`STATUS_SCRIPT` that auto-clicks npm's
+  "Use security key" button + the login-form prefill script). No desktop
+  notifications anywhere - deliberately removed; the sheet is the signal.
 - `src/webauthn.ts` + `src/signer.ts` + `src/cbor.ts` - the authenticator:
   assembles clientDataJSON/authenticatorData/attestation, stores credentials in
   `~/.keybridge/credentials.json`, signs via Secure Enclave helper (Touch ID)
   or a software P-256 key (tests / non-macOS).
 - `src/setup.ts` - `keybridge setup`: compiles both Swift helpers into
   `~/.keybridge/`, probes the Enclave, writes `config.json`.
-- `src/cli.ts` (`keybridge setup|publish|login`), `src/server.ts` (MCP stdio),
-  `src/actions/` (`NpmPublish` + `NpmLogin` silkweave actions).
+- `src/cli.ts` (`keybridge setup|status|enroll|login|switch|logout|open|
+  token|publish [--user]`), `src/server.ts` (MCP stdio), `src/actions/`
+  (`NpmPublish` + `NpmLogin` + `NpmStatus` + `NpmSwitchAccount`). Agent flow:
+  NpmStatus → (NpmSwitchAccount) → NpmPublish `{ user }`.
 - `native/` - `WebShell.swift` (windowless WKWebView ceremony shell),
   `inject.js` (page-world `navigator.credentials` override over
   `webkit.messageHandlers`, Bitwarden-style `ENOCRED` fallback to the real
@@ -48,7 +65,7 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   protocol; `inject.test.ts` runs `native/inject.js` against throwing stub
   prototypes + real crypto.
 - `_docs/` - **gitignored** dev/session notes (flow captures, UX research,
-  runbooks). `keybridge-test/` - gitignored local publish-test package.
+  runbooks).
 
 ## Key facts / gotchas
 
@@ -58,10 +75,36 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   a pure HTTP client (403 `cf-mitigated`) or Chrome (window flicker). While
   hidden, page timers throttle to ~1 Hz and rAF stops, but `evaluateJavaScript`
   + network are unthrottled - all the ceremony needs.
-- Shell cookies persist in `WKWebsiteDataStore(forIdentifier:)` (fixed UUID in
-  `WebShell.swift`), not in any browser profile. First run needs one manual
-  npmjs.com login - the presenter auto-surfaces a window when it detects a
-  password page, then never again.
+- Shell cookies persist in `WKWebsiteDataStore(forIdentifier:)` - **one UUID
+  per npm account** (accounts.json; `--store-id` shell arg), so switching
+  accounts never clobbers another session. The legacy fixed UUID in
+  `WebShell.swift` is grandfathered to the first account recorded. First
+  login per account needs one manual password - the presenter auto-surfaces
+  a window when it detects a password page, then never again.
+- Identity self-heals toward `npm whoami` after every login (store binding,
+  active account, credential `username` stamps via the store's
+  `lastAsserted` marker). An ENOCRED ceremony in a HIDDEN shell is fatal
+  (fast ENOKEY/ENOCRED error instead of a 5-min poll timeout); once
+  surfaced, ENOCRED is tolerated so the human can use npm's recovery-code
+  fallback. WebKit class-level data-store calls (purge) need a WebKit object
+  created first or they segfault (see `--purge-store` in WebShell.swift).
+- npm's login flow can CHAIN pages that each need their "Use security key"
+  click (live session: /login → /escalate/webauthn) - the presenter polls
+  nonstop and one-click/one-prefill-per-page is enforced by `window` flags
+  INSIDE the page (they reset on navigation). Never track navigation counts
+  presenter-side: eval-result and nav events can land in one pipe chunk, so
+  counter snapshots race (was a real flaky-hang bug).
+- Surfaced-window UX (WebShell.swift): the window is a bottom-center
+  NON-ACTIVATING NSPanel (418×678 sheet - under npm's responsive breakpoint,
+  so the page uses its compact layout; hidden titlebar + hidden traffic
+  lights, slides up; keyboard works without stealing app focus -
+  password-manager friendly). cmd+V/C/X/A need the main menu with standard
+  edit actions (menubar-less apps drop key equivalents); macOS
+  auto-capitalization is disabled via `UserDefaults.set` (`register` loses to
+  the global domain). Appearance follows the system (`--appearance` /
+  `KEYBRIDGE_APPEARANCE` forces it); npm's site theme is localStorage
+  `npm-color-mode` (defaults to light!) - a documentStart user script seeds
+  it to "system" once per profile.
 - **WKWebView has no real platform authenticator**, so the inject script's
   `ENOCRED` fallback to the native `navigator.credentials` effectively fails
   inside the shell. Consequence: an account with a pre-existing security key
@@ -92,9 +135,10 @@ node src/cli.ts setup   # (re)build both Swift helpers into ~/.keybridge
 - check: `pnpm check`
 - test: `pnpm test`
 - push: yes (origin https://github.com/tobiasstrebitzer/keybridge)
-- version_bump: no (pre-release; still `private: true`)
-- publish: no (flip `private` + pick a final name when ready; prepack rebuilds
-  `dist/`)
+- version_bump: yes (single package; infer patch/minor from changes)
+- publish: yes - dogfood it: use the keybridge `NpmPublish` MCP tool with
+  `user: "tstrebitzer"` (never raw `npm publish`; the hook blocks it anyway).
+  First published as `keybridge@0.4.0` on 2026-07-14. prepack rebuilds `dist/`
 - docs: `README.md` (product) + this file (dev map); `_docs/` is gitignored
   session notes
 - co_authored_by: no - never add AI co-author or session trailers

@@ -21,9 +21,8 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
-import type { Presenter } from '../engine.ts'
-import { notifyHuman } from './browser.ts'
-import { STATUS_SCRIPT, waitForAbort } from './shared.ts'
+import { PublishError, type Presenter } from '../engine.ts'
+import { prefillScript, STATUS_SCRIPT } from './shared.ts'
 import { handleCreate, handleGet, type CreateOptions, type GetOptions } from '../webauthn.ts'
 import { createSigner } from '../signer.ts'
 
@@ -44,6 +43,12 @@ export interface WebkitPresenterOptions {
   shellSource?: string
   /** navigator.credentials override injected at documentStart. */
   injectPath?: string
+  /** Website-data-store UUID: which account profile's cookies the shell uses.
+   * Default: the shell's built-in fixed id (the pre-accounts legacy store). */
+  storeId?: string
+  /** When npm bounces to a password login, prefill this username and focus
+   * the password field (the flow knows who it is logging in as). */
+  prefillUsername?: string
   /** Extra args for the shell (tests use ['--ephemeral']). */
   shellArgs?: string[]
   /** Answers create/get ceremonies. Default: v2 host webauthn + signer (Touch ID via Secure Enclave backend). */
@@ -54,7 +59,8 @@ export interface WebkitPresenterOptions {
   launchTimeoutMs?: number
   /** Diagnostics sink (default: stderr). */
   log?: (message: string) => void
-  /** Human-notification hook (default: macOS notification). */
+  /** Attention hook for surfaced-window / dead-end moments (default: none -
+   * the sheet itself is the signal; tests observe through this). */
   notify?: (message: string) => void
 }
 
@@ -63,6 +69,7 @@ interface ResolvedOptions {
   shellSource: string
   injectPath: string
   shellArgs: string[]
+  prefillUsername?: string
   webauthn: WebAuthnResponder
   surfaceOnLogin: boolean
   pollIntervalMs: number
@@ -76,13 +83,20 @@ export function resolveWebkitOptions (opts: WebkitPresenterOptions = {}): Resolv
     shellPath: opts.shellPath ?? process.env.KEYBRIDGE_WEBSHELL ?? join(KB_DIR, 'keybridge-webshell'),
     shellSource: opts.shellSource ?? join(NATIVE_DIR, 'WebShell.swift'),
     injectPath: opts.injectPath ?? join(NATIVE_DIR, 'inject.js'),
-    shellArgs: opts.shellArgs ?? [],
+    shellArgs: [
+      ...(opts.storeId ? ['--store-id', opts.storeId] : []),
+      // Window chrome + prefers-color-scheme follow the system by default;
+      // KEYBRIDGE_APPEARANCE=dark|light forces one.
+      ...(process.env.KEYBRIDGE_APPEARANCE ? ['--appearance', process.env.KEYBRIDGE_APPEARANCE] : []),
+      ...(opts.shellArgs ?? []),
+    ],
+    ...(opts.prefillUsername ? { prefillUsername: opts.prefillUsername } : {}),
     webauthn: opts.webauthn ?? answerWebAuthn,
     surfaceOnLogin: opts.surfaceOnLogin ?? true,
     pollIntervalMs: opts.pollIntervalMs ?? 500,
     launchTimeoutMs: opts.launchTimeoutMs ?? 15_000,
     log: opts.log ?? ((m) => process.stderr.write(`[keybridge webkit] ${m}\n`)),
-    notify: opts.notify ?? notifyHuman,
+    notify: opts.notify ?? (() => {}),
   }
 }
 
@@ -152,10 +166,16 @@ export class WebShell {
   #evalSeq = 0
   #pendingEvals = new Map<number, { resolve: (v: unknown) => void, reject: (e: Error) => void }>()
   #log: (m: string) => void
+  /** Resolves with the exit code once the shell process is gone. */
+  readonly exited: Promise<number | null>
 
   private constructor (child: ChildProcess, log: (m: string) => void) {
     this.#child = child
     this.#log = log
+    this.exited = new Promise((resolveExit) => {
+      child.once('exit', (code) => resolveExit(code))
+      child.once('error', () => resolveExit(null))
+    })
   }
 
   static start (o: ResolvedOptions): Promise<WebShell> {
@@ -268,6 +288,23 @@ export async function openSurfacedShell (url: string, opts: WebkitPresenterOptio
 }
 
 /**
+ * Delete the persistent website data store of one account profile (used by
+ * `keybridge logout --web`). Best effort: false when the shell binary is
+ * unavailable or the purge fails.
+ */
+export async function purgeWebStore (storeId: string, opts: WebkitPresenterOptions = {}): Promise<boolean> {
+  const o = resolveWebkitOptions(opts)
+  try {
+    await ensureShellBinary(o)
+    const { stdout } = await execFileP(o.shellPath, ['--purge-store', storeId])
+    const last = JSON.parse(stdout.trim().split('\n').pop() ?? '{}') as { ok?: boolean }
+    return last.ok === true
+  } catch {
+    return false
+  }
+}
+
+/**
  * The Tier A2 presenter. Engine contract: called with ({ authUrl, signal });
  * must get the human to the ceremony; the engine aborts `signal` once doneUrl
  * reports completion (or on timeout), at which point the shell is torn down.
@@ -278,27 +315,69 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
   return async ({ authUrl, signal }) => {
     if (signal.aborted) return
     await ensureShellBinary(o)
-    const shell = await WebShell.start(o)
+
+    // A ceremony the credential store can't answer (ENOCRED) never completes
+    // while the shell is hidden: the inject script's fallback to the real
+    // authenticator has nothing to talk to inside a WKWebView, and no human is
+    // looking at the page. Fail the flow fast (the engine aborts its doneUrl
+    // polling on `fatal`) instead of hanging until the poll timeout. Once the
+    // window is surfaced a human is present and can use npm's own fallbacks
+    // (e.g. "use a recovery code"), so ENOCRED is no longer fatal.
+    const state = { surfaced: false, fatal: null as PublishError | null }
+    const run: ResolvedOptions = {
+      ...o,
+      webauthn: async (op, options, origin) => {
+        const resp = await o.webauthn(op, options, origin)
+        if (!resp.ok && resp.code === 'ENOCRED' && !state.surfaced) {
+          const err = new PublishError(
+            'npm asked for a security key that keybridge has not enrolled for this account - run `keybridge enroll` for it (`keybridge status` shows which accounts have keys)',
+            { code: 'ENOCRED' })
+          err.fatal = true
+          state.fatal = err
+          o.notify('keybridge has no security key for this npm account - run `keybridge enroll`')
+        }
+        return resp
+      },
+    }
+
+    const shell = await WebShell.start(run)
     try {
       shell.send({ cmd: 'navigate', url: authUrl })
 
-      let surfaced = false
+      // The engine owns completion: it aborts the signal once doneUrl flips.
+      // Polling never stops: the auto-click is per PAGE, not per ceremony -
+      // npm's flows can chain pages that each need their "Use security key"
+      // pressed (a live session redirects /login -> /escalate/webauthn, and
+      // only the escalate page's click fires navigator.credentials.get()).
+      // One-click-per-page and one-prefill-per-page are enforced by window
+      // flags INSIDE the page (they reset on navigation), so the presenter
+      // needs no navigation bookkeeping at all.
+      let announcedClick = false
+      let announcedPrefill = false
       while (!signal.aborted) {
+        if (state.fatal) throw state.fatal
         const status = await shell.eval(STATUS_SCRIPT).catch(() => 'pending')
-        if (status === 'clicked') {
+        if (status === 'clicked' && !announcedClick) {
+          announcedClick = true
           o.log('ceremony triggered - waiting for Touch ID approval')
-          break
-        }
-        if (status === 'login-page' && o.surfaceOnLogin && !surfaced) {
-          surfaced = true
-          o.log('npm wants a password login - surfacing the ceremony window')
-          shell.send({ cmd: 'surface' })
-          o.notify('npm needs you to log in - a keybridge window has been opened')
+        } else if (status === 'login-page') {
+          if (o.surfaceOnLogin && !state.surfaced) {
+            state.surfaced = true
+            o.log('npm wants a password login - surfacing the ceremony window')
+            shell.send({ cmd: 'surface' })
+            o.notify('npm needs you to log in - a keybridge window has been opened')
+          }
+          if (o.prefillUsername) {
+            const result = await shell.eval(prefillScript(o.prefillUsername)).catch(() => 'pending')
+            if (result === 'prefilled' && !announcedPrefill) {
+              announcedPrefill = true
+              o.log(`login form prefilled for ${o.prefillUsername}`)
+            }
+          }
         }
         await delay(o.pollIntervalMs, null, { signal }).catch(() => {})
       }
-      // The engine owns completion: it aborts the signal once doneUrl flips.
-      await waitForAbort(signal)
+      if (state.fatal) throw state.fatal
     } finally {
       shell.close()
     }

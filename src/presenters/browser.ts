@@ -22,14 +22,3 @@ export function browserPresenter (): Presenter {
   })
 }
 
-// Best-effort desktop notification so the user knows a touch is awaited.
-export function notifyHuman (message: string, { title = 'keybridge' }: { title?: string } = {}): void {
-  try {
-    if (process.platform === 'darwin') {
-      const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)} sound name "Glass"`
-      spawn('osascript', ['-e', script], { stdio: 'ignore', detached: true }).unref()
-    } else if (process.platform === 'linux') {
-      spawn('notify-send', [title, message], { stdio: 'ignore', detached: true }).unref()
-    }
-  } catch {}
-}

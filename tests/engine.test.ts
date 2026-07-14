@@ -149,3 +149,56 @@ test('non-EOTP publish failures surface as PublishError without a ceremony', asy
   )
   assert.equal(presenterCalled, false)
 })
+
+test('a fatal presenter error aborts doneUrl polling immediately', async (t) => {
+  // The ceremony can never complete: /done stays 202 (auth page never marks
+  // it complete) and the presenter dies with a fatal error (the webkit
+  // presenter's ENOCRED path). The publish must fail with that error right
+  // away instead of waiting out the 30s poll timeout.
+  const registry = await startMockRegistry({ completeAuthOnVisit: false })
+  t.after(() => registry.close())
+  const fixture = makeFixture(registry.url)
+  t.after(() => fixture.dispose())
+
+  const fatalErr = new PublishError('no keybridge credential enrolled for this account', { code: 'ENOCRED' })
+  fatalErr.fatal = true
+
+  const started = Date.now()
+  await assert.rejects(
+    publishWithWebAuth({
+      cwd: fixture.dir,
+      npmArgs: ['--registry', registry.url, '--userconfig', fixture.npmrc],
+      pollTimeoutMs: 30_000,
+      presenter: async () => { throw fatalErr },
+    }),
+    (e: unknown) => e instanceof PublishError && e.code === 'ENOCRED'
+  )
+  assert.ok(Date.now() - started < 10_000, 'failed fast instead of waiting for the poll timeout')
+})
+
+test('env token override authenticates the whole publish without touching npmrc', async (t) => {
+  // The mediation path: another account's token rides along as an npm env
+  // override. Both the publish PUTs and the doneUrl polling must use it, and
+  // the npmrc must stay untouched.
+  const registry = await startMockRegistry()
+  t.after(() => registry.close())
+  const fixture = makeFixture(registry.url)
+  t.after(() => fixture.dispose())
+  const emptyNpmrc = join(fixture.dir, 'empty-npmrc')
+  writeFileSync(emptyNpmrc, '')
+
+  const tokenKey = `npm_config_//${new URL(registry.url).host}/:_authToken`
+  const outcome = await publishWithWebAuth({
+    cwd: fixture.dir,
+    npmArgs: ['--registry', registry.url, '--userconfig', emptyNpmrc],
+    env: { ...process.env, [tokenKey]: 'vault-token-x' },
+    autoLogin: false,
+    pollTimeoutMs: 30_000,
+    presenter: async ({ authUrl }) => { await fetch(authUrl) },
+  })
+
+  assert.equal(outcome.published, true)
+  assert.equal(registry.state.puts[0]!.authorization, 'Bearer vault-token-x', 'publish PUT used the env token')
+  assert.deepEqual([...registry.state.doneAuthHeaders], ['Bearer vault-token-x'], 'doneUrl polling used the env token')
+  assert.equal(readFileSync(emptyNpmrc, 'utf8'), '', 'npmrc stayed untouched')
+})

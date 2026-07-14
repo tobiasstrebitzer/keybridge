@@ -2,10 +2,10 @@ node_modules/
 dist/
 *.log
 .DS_Store
+.env*
 
-# dev-only: session notes / research docs and the local publish test package
+# dev-only: session notes / research docs
 _docs/
-keybridge-test/
 
 # per-user local Claude Code settings (not shared)
 settings.local.json

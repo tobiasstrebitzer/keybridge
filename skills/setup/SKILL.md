@@ -81,10 +81,27 @@ Existing keys keep working; npm supports multiple.
 
 ## 5. Verify
 
+- Call the `NpmStatus` MCP tool (or `<plugin-root>/scripts/keybridge.sh
+  status`): it must show the logged-in user with at least one security key
+  and no warnings.
 - Call the `NpmPublish` MCP tool with `dryRun: true` in a publishable
   project - validates packaging with no ceremony.
 - Optionally do a real publish (`NpmPublish`, or `/keybridge:npm-publish`):
   the only visible step must be the Touch ID dialog.
+
+## Multiple npm accounts
+
+Each npm account gets its own keybridge browser profile, keyed by `npm
+whoami`. `keybridge switch <username>` (or the `NpmSwitchAccount` MCP tool)
+changes accounts; a first-time account asks for its password once, after
+that switching is just a Touch ID tap - or instant while a stored token for
+the account is still valid (every login stores one; ~12h). For long-lived
+instant switching the user can park a granular access token per account
+(`keybridge token set <username>`; create it WITHOUT "bypass 2FA"). With a
+stored token, `NpmPublish { user }` can even publish as another account
+without switching the CLI session at all. Each account also needs its own
+`keybridge enroll` (step 4) - `keybridge status` / `NpmStatus` shows which
+accounts have keys and tokens.
 
 ## Troubleshooting
 
@@ -101,7 +118,10 @@ Existing keys keep working; npm supports multiple.
 - **`npm session expired`** mid-publish is normal after ~12 h: keybridge
   re-runs login automatically (one extra touch). To avoid it, the user can
   put a granular npm access token *without* "bypass 2FA" in `~/.npmrc`.
+- **Publish fails with `ENOKEY` or `ENOCRED`**: the current npm account
+  (`npm whoami`) has no keybridge security key - run step 4 for it. This
+  happens after switching to an account that never enrolled.
 - State lives in `~/.keybridge/` (helpers, `credentials.json`,
-  `config.json`); deleting that directory and re-running this skill resets
-  everything except the passkey on the npm account (remove that under
-  *Settings → Two-Factor Authentication*).
+  `accounts.json`, `config.json`); deleting that directory and re-running
+  this skill resets everything except the passkey on the npm account (remove
+  that under *Settings → Two-Factor Authentication*).

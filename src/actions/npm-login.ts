@@ -1,11 +1,11 @@
 // `NpmLogin` MCP tool: run just the web-login ceremony and persist the
 // ~12h session token to the user npmrc. Useful to pre-authenticate before a
-// batch of publishes (each publish still needs its own touch).
+// batch of publishes (each publish still needs its own touch). Re-logs-in as
+// the current (or last active) account; use npm-switch-account to change who.
 import { createAction, type Logger } from '@silkweave/core'
 import { z } from 'zod/v4'
-import { loginWithWebAuth, PublishError, type StatusEvent } from '../engine.ts'
-import { notifyHuman } from '../presenters/browser.ts'
-import { selectPresenter } from '../presenters/select.ts'
+import { loginAs } from '../accounts.ts'
+import { PublishError, type StatusEvent } from '../engine.ts'
 
 const input = z.object({
   registry: z.string().url()
@@ -14,6 +14,7 @@ const input = z.object({
 })
 
 const output = z.object({
+  user: z.string().describe('The account the npm CLI is now logged in as (confirmed via `npm whoami`).'),
   registry: z.string().describe('The registry the session token was issued for.'),
   npmrc: z.string().describe('The npmrc file the session token was written to.'),
 })
@@ -24,25 +25,21 @@ export const NpmLoginAction = createAction({
     'Log in to the npm registry via the web-auth ceremony. The user approves',
     'with their security key or Touch ID (driven through an invisible',
     'off-screen browser); the ~12h session token is persisted to their npmrc.',
-    'Publishing does this automatically when needed - call this only to',
-    'pre-authenticate explicitly.',
+    'Re-authenticates as the current or last active account - to change',
+    'accounts use npm-switch-account instead. Publishing does this',
+    'automatically when needed - call this only to pre-authenticate explicitly.',
   ].join(' '),
   input,
   output,
   disposition: 'structured',
   annotations: { openWorldHint: true },
   run: async ({ registry }, context) => {
-    const { presenter } = selectPresenter()
     const logger = context.getOptional<Logger>('logger')
     let progress = 0
-    const result = await loginWithWebAuth({
+    const result = await loginAs(undefined, {
       registry,
-      presenter,
       pollTimeoutMs: 300_000,
       onStatus: ({ phase, authUrl }: StatusEvent) => {
-        if (phase === 'awaiting-human') {
-          notifyHuman('npm login is waiting for your security key / Touch ID approval')
-        }
         logger?.progress({ progress: ++progress, message: phase === 'awaiting-human' ? `Waiting for WebAuthn verification at ${authUrl}` : phase })
       },
     }).catch((e: unknown) => {
@@ -50,6 +47,6 @@ export const NpmLoginAction = createAction({
       if (e instanceof PublishError) e.message = e.fullMessage()
       throw e
     })
-    return { registry: result.registry, npmrc: result.npmrc }
+    return { user: result.user, registry: result.registry, npmrc: result.npmrc }
   },
 })

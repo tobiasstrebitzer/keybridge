@@ -12,8 +12,8 @@
 import { createAction, type Logger, type SilkweaveContext } from '@silkweave/core'
 import { resolve, sep } from 'node:path'
 import { z } from 'zod/v4'
-import { publishWithWebAuth, PublishError, type StatusEvent } from '../engine.ts'
-import { notifyHuman } from '../presenters/browser.ts'
+import { assertSecurityKeyFor, bindAccount, bindAfterLogin, resolveMediation, resolvePublishIdentity, whoami, type Mediation } from '../accounts.ts'
+import { publishWithWebAuth, resolveRegistry, PublishError, type StatusEvent } from '../engine.ts'
 import { selectPresenter } from '../presenters/select.ts'
 
 const PROJECT_ROOT = process.cwd()
@@ -31,6 +31,9 @@ const input = z.object({
   dryRun: z.boolean()
     .describe('Run npm publish --dry-run (no auth ceremony, nothing published).')
     .optional(),
+  user: z.string().regex(/^[a-z0-9][a-z0-9._~-]*$/i)
+    .describe('npm account this publish must run as. If the CLI is logged in as someone else but keybridge has a working stored token for this account, the publish is mediated with that token (the CLI session is untouched); otherwise it fails fast with nothing published - call npm-status / npm-switch-account. Recommended whenever the account matters.')
+    .optional(),
 })
 
 const output = z.object({
@@ -38,6 +41,7 @@ const output = z.object({
   dryRun: z.boolean().describe('Whether this was a --dry-run validation.'),
   usedWebAuth: z.boolean().describe('Whether a human WebAuthn ceremony was required.'),
   package: z.string().nullable().describe('The published package id (name@version).'),
+  user: z.string().nullable().describe('The npm account the publish ran as (`npm whoami`).'),
 })
 
 function progressReporter (context: SilkweaveContext): (message: string) => void {
@@ -56,13 +60,15 @@ export const NpmPublishAction = createAction({
     'If the npm login session is missing or expired, a web-login ceremony',
     'runs first automatically (the user touches twice in total).',
     'Blocks until the user approves (or a timeout). Use dryRun to validate',
-    'the package without publishing.',
+    'the package without publishing. When the account matters, pass `user`',
+    '(the expected npm username) - the publish fails fast instead of going',
+    'out under the wrong account.',
   ].join(' '),
   input,
   output,
   disposition: 'structured',
   annotations: { destructiveHint: false, openWorldHint: true },
-  run: async ({ cwd: cwdInput, tag, access, dryRun }, context) => {
+  run: async ({ cwd: cwdInput, tag, access, dryRun, user: expectedUser }, context) => {
     const cwd = resolve(PROJECT_ROOT, cwdInput ?? '.')
     if (cwd !== PROJECT_ROOT && !cwd.startsWith(PROJECT_ROOT + sep)) {
       throw new PublishError(`cwd escapes the project root: ${cwd}`, { code: 'ECWD' })
@@ -73,7 +79,40 @@ export const NpmPublishAction = createAction({
     if (access) npmArgs.push('--access', access)
     if (dryRun) npmArgs.push('--dry-run')
 
-    const { presenter } = selectPresenter()
+    // Identity preflight: `npm whoami` decides who this publish runs as; the
+    // ceremony shell uses that account's own browser profile. When the CLI is
+    // someone else but a stored token for `user` still works, the publish is
+    // MEDIATED: that token rides along as an env override and the CLI
+    // session/npmrc stays untouched.
+    const identity = await resolvePublishIdentity({ cwd, npmArgs })
+    let publishUser = identity.user
+    let storeId = identity.storeId
+    let mediation: Mediation | null = null
+    if (expectedUser && identity.user !== expectedUser) {
+      mediation = await resolveMediation(expectedUser, { cwd, npmArgs })
+      if (mediation) {
+        publishUser = expectedUser
+        storeId = mediation.storeId
+      } else if (identity.user) {
+        throw new PublishError(
+          `npm is logged in as "${identity.user}" and no working token is stored for "${expectedUser}" - nothing was published. Call npm-switch-account first.`,
+          { code: 'EACCOUNT' })
+      } else {
+        throw new PublishError(
+          `npm is logged out and no working token is stored for "${expectedUser}" - nothing was published. Call npm-switch-account first.`,
+          { code: 'EACCOUNT' })
+      }
+    }
+    const prefillUsername = publishUser ?? identity.active
+    const { name: presenterName, presenter } = selectPresenter(undefined, {
+      webkit: { storeId, ...(prefillUsername ? { prefillUsername } : {}) },
+    })
+    if (publishUser && presenterName === 'webkit' && !dryRun) {
+      const registry = mediation?.registry
+        ?? await resolveRegistry({ cwd, npmArgs }).catch(() => 'https://registry.npmjs.org/')
+      assertSecurityKeyFor(publishUser, registry)
+    }
+
     const sendProgress = progressReporter(context)
 
     const outcome = await publishWithWebAuth({
@@ -81,9 +120,12 @@ export const NpmPublishAction = createAction({
       cwd,
       presenter,
       pollTimeoutMs: 300_000,
+      // Mediated publishes must never auto-login: that would mint a token
+      // for the WRONG account into npmrc. An expired token fails fast.
+      ...(mediation ? { env: mediation.env, autoLogin: false } : {}),
+      afterLogin: async (login) => { await bindAfterLogin(storeId, { cwd, npmArgs }, login) },
       onStatus: ({ phase, authUrl }: StatusEvent) => {
         if (phase === 'awaiting-human') {
-          notifyHuman('npm publish is waiting for your security key / Touch ID approval')
           sendProgress(`Waiting for the user to complete WebAuthn verification at ${authUrl}`)
         } else {
           sendProgress(phase)
@@ -96,11 +138,18 @@ export const NpmPublishAction = createAction({
       throw e
     })
 
+    // A mediated ceremony proved the profile belongs to that account - keep
+    // the binding (without stealing the active pointer).
+    if (mediation && outcome.usedWebAuth) bindAccount(mediation.user, storeId, { activate: false })
+
     return {
       published: !dryRun,
       dryRun: Boolean(dryRun),
       usedWebAuth: outcome.usedWebAuth,
       package: outcome.result?.id ?? outcome.result?.name ?? null,
+      // When the publish auto-logged-in, the identity was unknown up front -
+      // report who it actually ran as.
+      user: publishUser ?? await whoami({ cwd, npmArgs }),
     }
   },
 })
