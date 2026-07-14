@@ -2,10 +2,13 @@ node_modules/
 dist/
 *.log
 .DS_Store
-.chrome-dev-profile/
+
+# dev-only: session notes / research docs and the local publish test package
+_docs/
+keybridge-test/
 
 # per-user local Claude Code settings (not shared)
 settings.local.json
 
-# local machine state that lives under $HOME/.keybridge, never in-repo:
-# credentials.json, se-keys/, keybridge-se-signer, keybridge-launch.sh
+# local machine state lives under $HOME/.keybridge, never in-repo:
+# credentials.json, config.json, keybridge-se-signer, keybridge-webshell

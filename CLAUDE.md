@@ -1,87 +1,86 @@
 # keybridge
 
 Safe WebAuthn bridge for `npm publish` from agents: the agent initiates, the
-human approves with a security key / Touch ID. keybridge automates everything
-around the ceremony, never the ceremony itself.
+human approves with Touch ID. keybridge automates everything around the
+ceremony, never the ceremony itself. **Validated end-to-end 2026-07-14**
+against npm production (enroll + login + publish, real Touch ID, fully
+invisible ceremony). `README.md` is the product doc; this file is the dev map.
 
-**Validated end-to-end 2026-07-14** against npm production (enroll + login +
-publish) with a purely-software Secure Enclave authenticator.
+## Layout
 
-## Two parts
+One TS package (TS7 / oxlint / pnpm; dev runs native `.ts` under Node ≥ 22.18;
+`pnpm build` / tsdown emits `dist/` unbundled so `../../native` path math
+survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
 
-- **Root package (`src/`, `tests/`, `hooks/`, `skills/`, `.claude-plugin/`)** —
-  the shipped `keybridge` package + Claude plugin, on the **TS7 / oxlint / pnpm**
-  stack (dev runs native `.ts` under Node ≥ 22.18; `pnpm build` / tsdown emits
-  `dist/` for the published package) using **silkweave** (`@silkweave/core` +
-  `@silkweave/mcp`). Ships **Tier A**:
-  `src/presenters/chrome.ts` drives the v2 extension in an invisible (minimized)
-  off-screen Chrome over a hand-rolled CDP client (`src/cdp.ts`), so only Touch
-  ID is visible; `src/presenters/browser.ts` is the fallback;
-  `src/presenters/select.ts` picks Tier A on macOS. `src/engine.ts` (npm
-  publish/login orchestration: `mintWebAuthSession`, `pollDoneUrl`,
-  `publishWithWebAuth`, `loginWithWebAuth`), `src/actions/*` (`NpmPublish` +
-  `NpmLogin` silkweave actions), `src/server.ts` (MCP stdio), `src/cli.ts`
-  (`keybridge publish|login`). Tests: `tests/**/*.test.ts` under `node --test`.
-  (The original plain-JS `bin/`+`src/`+`test/` package was collapsed into this
-  TS package on 2026-07-14; `git log` has it if needed.)
-- **`v2/`** — the general-purpose Claude↔WebAuthn bridge the presenter drives:
-  MV3 extension (`v2/extension/` — MAIN-world `navigator.credentials` override) →
-  native host (`v2/host/`) → Secure Enclave signer
-  (`v2/helper/SecureEnclaveSigner.swift`). Installer: `node v2/install.mjs`.
-  Tests: `v2/test/` (plain JS). `inject.js` has the **Bitwarden-style `ENOCRED`
-  fallback**: when the daemon has no keybridge credential for the rpId it calls
-  the *real* `navigator.credentials`, so keybridge can stay installed in a
-  profile the user also logs into normally.
+- `src/engine.ts` — npm publish/login orchestration (`mintWebAuthSession`,
+  `pollDoneUrl`, `publishWithWebAuth`, `loginWithWebAuth`).
+- `src/presenters/` — `webkit.ts` (the macOS default: drives the windowless
+  WKWebView shell over JSON-lines stdio, answers WebAuthn ceremonies
+  in-process), `browser.ts` (open-default-browser fallback + `notifyHuman`),
+  `select.ts` (webkit → browser), `shared.ts` (`STATUS_SCRIPT` that auto-clicks
+  npm's "Use security key" button).
+- `src/webauthn.ts` + `src/signer.ts` + `src/cbor.ts` — the authenticator:
+  assembles clientDataJSON/authenticatorData/attestation, stores credentials in
+  `~/.keybridge/credentials.json`, signs via Secure Enclave helper (Touch ID)
+  or a software P-256 key (tests / non-macOS).
+- `src/setup.ts` — `keybridge setup`: compiles both Swift helpers into
+  `~/.keybridge/`, probes the Enclave, writes `config.json`.
+- `src/cli.ts` (`keybridge setup|publish|login`), `src/server.ts` (MCP stdio),
+  `src/actions/` (`NpmPublish` + `NpmLogin` silkweave actions).
+- `native/` — `WebShell.swift` (windowless WKWebView ceremony shell),
+  `inject.js` (page-world `navigator.credentials` override over
+  `webkit.messageHandlers`, Bitwarden-style `ENOCRED` fallback to the real
+  authenticator), `SecureEnclaveSigner.swift`.
+- `hooks/`, `skills/`, `.claude-plugin/`, `.mcp.json` — the Claude plugin
+  (deny raw `npm publish` in Bash; `.mcp.json` points at `src/server.ts`
+  native-TS for local use and is not shipped).
+- `tests/` — `node --test`, all TS. `mock-registry.ts` reproduces npmjs.com's
+  CLI contract; `helpers/fake-shell.mjs` mimics the WKWebView shell's stdio
+  protocol; `inject.test.ts` runs `native/inject.js` against throwing stub
+  prototypes + real crypto.
+- `_docs/` — **gitignored** dev/session notes (flow captures, UX research,
+  runbooks). `keybridge-test/` — gitignored local publish-test package.
 
-## Docs
-
-- `_docs/NPM_WEBAUTHN_FLOW.md` — the proven end-to-end flow + every edge case.
-- `_docs/HEADLESS_UX_RESEARCH.md` — invisible-UX research (Tier A design;
-  browserless is blocked by Cloudflare).
-- `_docs/NEXT_SESSION.md` — plan for the next session.
-
-## Key facts / gotchas (see docs for detail)
+## Key facts / gotchas
 
 - npm accepts a `none`-attestation software/SE passkey (enroll + assert).
-- Native-messaging host must launch via a `/bin/sh` wrapper with an **absolute**
-  node path (Chrome strips PATH); manifest must also live in
-  `<user-data-dir>/NativeMessagingHosts/` for custom profiles.
-- npm 11.x redacts publish `authUrl`/`doneUrl` → `engine.mintWebAuthSession`
-  recovers unredacted URLs.
-- Chrome 150 ignores `--load-extension`; load via CDP `Extensions.loadUnpacked`.
-  The presenter's own CDP client drives Chrome over a raw ws port, so Chrome is
-  launched with `--enable-unsafe-extension-debugging`.
-- `www.npmjs.com` is behind Cloudflare — no pure-HTTP browserless client.
-- **macOS clamps off-screen window coordinates to the display** — `--window-
-  position=-32000,-32000` only nudges the window to the screen edge. The Tier A
-  presenter hides the window by **minimizing** it (`Browser.setWindowBounds
-  {windowState:'minimized'}`); probed live, the page's JS + network keep running
-  while minimized, so the ceremony completes with only Touch ID visible.
-- The Tier A Chrome is kept **warm** across publishes via the profile's
-  `DevToolsActivePort` file (a later CLI/MCP invocation reattaches instead of
-  cold-starting ~8 s). Its persistent profile lives at
-  `~/.keybridge/chrome-profile` (holds `cf_clearance` + `wub` + the extension).
+- **A windowless WKWebView passes Cloudflare on `www.npmjs.com` with NO
+  challenge, even cold** (probed 2026-07-14) — that's why WKWebView instead of
+  a pure HTTP client (403 `cf-mitigated`) or Chrome (window flicker). While
+  hidden, page timers throttle to ~1 Hz and rAF stops, but `evaluateJavaScript`
+  + network are unthrottled — all the ceremony needs.
+- Shell cookies persist in `WKWebsiteDataStore(forIdentifier:)` (fixed UUID in
+  `WebShell.swift`), not in any browser profile. First run needs one manual
+  npmjs.com login — the presenter auto-surfaces a window when it detects a
+  password page, then never again.
+- npm 11.x redacts publish `authUrl`/`doneUrl` (`…/***`; fixed in npm 12) →
+  `engine.mintWebAuthSession` recovers unredacted URLs via a metadata-only
+  `PUT` with `npm-auth-type: web`.
+- The SE signer shells out synchronously — the event loop stalls during the
+  human's Touch ID think-time; engine polling resumes after. Fine by design.
+- The CryptoKit SecureEnclave API stores on-disk key blobs (no keychain
+  entitlement needed) — ad-hoc-signed helper binaries work.
+- History: the earlier architecture (MV3 extension → native-messaging host →
+  CDP-driven off-screen Chrome, "Tier A") was removed 2026-07-14 in favor of
+  the WKWebView shell; `git log` has it if ever needed.
 
 ## Commands
 
 ```sh
-pnpm check                      # tsc --noEmit + oxlint + node --test (native TS)
-pnpm test                       # just the root TS tests (engine, cdp, presenter, hook)
-pnpm build                      # tsdown: src/ → dist/ (ESM; what the package ships)
-node --test v2/test/*.test.mjs  # v2 extension/host tests (plain JS)
-node v2/install.mjs             # (re)install SE helper, launcher, NM manifests
+pnpm check              # tsc --noEmit + oxlint + node --test (native TS)
+pnpm build              # tsdown: src/ → dist/ (ESM; what the package ships)
+node src/cli.ts setup   # (re)build both Swift helpers into ~/.keybridge
 ```
 
 ## Wrapup Config
 
-- check: `pnpm check` (root is TS7 + oxlint; v2 stays plain JS, linted out via
-  `.oxlintrc.json` ignorePatterns and outside `tsconfig` include)
-- test: `pnpm test` + `node --test v2/test/*.test.mjs`
-- push: no
-- version_bump: no (spike)
-- publish: no (spike — package is `private: true`, but publish-ready in shape)
-- docs: `_docs/` folder + this file as index; `README.md` is the product doc
-- notes: `pnpm build` (tsdown) emits `dist/` (gitignored); `bin` + the npm
-  tarball ship compiled `dist/*.mjs` + the v2 runtime only (`files` whitelist).
-  `.mcp.json` points at `src/server.ts` (native TS) for local/plugin use and is
-  not shipped. `dist/` must exist on disk for `npm pack` (prepack rebuilds it).
+- check: `pnpm check`
+- test: `pnpm test`
+- push: no (repo not on a remote yet — user publishes to GitHub manually)
+- version_bump: no (pre-release; still `private: true`)
+- publish: no (flip `private` + pick a final name when ready; prepack rebuilds
+  `dist/`)
+- docs: `README.md` (product) + this file (dev map); `_docs/` is gitignored
+  session notes
+- notes: npm tarball ships `dist/` + `native/` only (`files` whitelist);
+  `dist/` must exist for `npm pack` (prepack rebuilds it)

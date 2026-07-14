@@ -1,11 +1,18 @@
-// MAIN-world content script: replace navigator.credentials.create/get so that
-// WebAuthn ceremonies on this page are answered by the local keybridge daemon
-// instead of a real authenticator. Runs at document_start so the override is
-// in place before the page's own scripts call WebAuthn.
-//
-// This is the same interception technique password managers (Bitwarden,
-// 1Password) use — the difference is where the signature comes from.
+// WKWebView user script (documentStart, page world): replace
+// navigator.credentials.create/get so WebAuthn ceremonies are answered by the
+// keybridge parent process instead of a real authenticator. This is the same
+// interception technique password managers (Bitwarden, 1Password) use — the
+// difference is where the signature comes from (the parent's Secure Enclave
+// signer). Transport: webkit.messageHandlers.keybridge is a WithReply handler,
+// so postMessage returns a Promise resolved with the parent's response (a
+// JSON string).
 (() => {
+  'use strict'
+  if (!navigator.credentials || !window.webkit || !window.webkit.messageHandlers) return
+  // Capture the transport before the page can tamper with window.webkit.
+  const kbHandler = window.webkit.messageHandlers.keybridge
+  if (!kbHandler) return
+
   const b64urlFromBuf = (buf) => {
     const bytes = new Uint8Array(buf)
     let s = ''
@@ -21,7 +28,7 @@
   }
 
   // Deep-convert ArrayBuffers/TypedArrays to {$b64:...} so options survive
-  // JSON transport to the daemon.
+  // JSON transport to the parent.
   const serialize = (v) => {
     if (v instanceof ArrayBuffer) return { $b64: b64urlFromBuf(v) }
     if (ArrayBuffer.isView(v)) {
@@ -36,42 +43,25 @@
     return v
   }
 
-  const pending = new Map()
-  let seq = 0
-
-  window.addEventListener('message', (e) => {
-    if (e.source !== window) return
-    const d = e.data
-    if (!d || d.source !== 'keybridge-content') return
-    const p = pending.get(d.id)
-    if (!p) return
-    pending.delete(d.id)
-    if (d.resp && d.resp.ok) p.resolve(d.resp.credential)
-    else {
-      const err = new Error((d.resp && d.resp.error) || 'keybridge daemon error')
-      err.code = d.resp && d.resp.code
-      p.reject(err)
-    }
-  })
-
-  const request = (op, options) => new Promise((resolve, reject) => {
-    const id = `kb-${Date.now()}-${seq++}`
-    pending.set(id, { resolve, reject })
-    window.postMessage({ source: 'keybridge-inject', id, op, options, origin: window.location.origin }, window.location.origin)
-  })
+  const request = (op, options) =>
+    kbHandler.postMessage({ op, options: serialize(options), origin: window.location.origin })
+      .then((raw) => {
+        const resp = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (resp && resp.ok) return resp.credential
+        const err = new Error((resp && resp.error) || 'keybridge shell error')
+        err.code = resp && resp.code
+        throw err
+      })
 
   // Native constructors captured before we override navigator.credentials.
-  // We re-parent our synthetic results onto these prototypes so RP libraries'
-  // `instanceof PublicKeyCredential` / `instanceof AuthenticatorAttestationResponse`
-  // checks pass — the single most important thing that makes the credential
-  // "indistinguishable from native" (the technique Bitwarden's extension uses).
+  // Synthetic results are re-parented onto these prototypes so RP libraries'
+  // `instanceof PublicKeyCredential` checks pass (same as the extension).
   const NativePublicKeyCredential = window.PublicKeyCredential
   const NativeAttestationResponse = window.AuthenticatorAttestationResponse
   const NativeAssertionResponse = window.AuthenticatorAssertionResponse
 
   // Force the page to believe a user-verifying platform authenticator and
-  // conditional mediation are available, so the passkey path is offered and not
-  // silently disabled. (Bitwarden polyfills UVPAA the same way.)
+  // conditional mediation are available, so the passkey path is offered.
   if (NativePublicKeyCredential) {
     try {
       NativePublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(true)
@@ -158,15 +148,14 @@
   const realCreate = credentials.create.bind(credentials)
   const realGet = credentials.get.bind(credentials)
 
-  // Bitwarden-style fallback: when the daemon reports it has no keybridge
-  // credential for this rpId (ENOCRED), hand the ceremony to the REAL
-  // navigator.credentials so a different authenticator (hardware key, iCloud
-  // passkey, ...) still works. This lets keybridge stay installed in a profile
-  // the user also logs into normally. Anything else is a genuine failure and
-  // surfaces as NotAllowedError, like a declined/failed native ceremony.
+  // ENOCRED fallback kept for parity with the extension: if the parent has no
+  // keybridge credential for this rpId, hand the ceremony to the real
+  // navigator.credentials. (In a bare WKWebView the platform authenticator is
+  // generally unavailable, so this usually surfaces as the page's own error —
+  // but the shell's profile is keybridge-dedicated, so it shouldn't trigger.)
   navigator.credentials.create = function (options) {
     if (!options || !options.publicKey) return realCreate(options)
-    return request('create', serialize(options.publicKey))
+    return request('create', options.publicKey)
       .then(toCreateCredential)
       .catch((err) => {
         if (err && err.code === 'ENOCRED') return realCreate(options)
@@ -176,7 +165,7 @@
 
   navigator.credentials.get = function (options) {
     if (!options || !options.publicKey) return realGet(options)
-    return request('get', serialize(options.publicKey))
+    return request('get', options.publicKey)
       .then(toGetCredential)
       .catch((err) => {
         if (err && err.code === 'ENOCRED') return realGet(options)

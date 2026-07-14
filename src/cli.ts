@@ -1,23 +1,30 @@
 #!/usr/bin/env node
 // keybridge CLI — human-facing entry point.
 //
-//   keybridge publish [--poll-timeout <sec>] [--presenter chrome|browser] [--] [npm publish args...]
-//   keybridge login   [--poll-timeout <sec>] [--presenter chrome|browser] [--] [npm-ish args, e.g. --registry]
+//   keybridge setup                                       # build native helpers, pick backend
+//   keybridge publish [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm publish args...]
+//   keybridge login   [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm-ish args, e.g. --registry]
 //
 // publish: runs `npm publish`; when npm demands web-based WebAuthn
-// verification, drives the ceremony in an invisible off-screen Chrome (Tier A)
-// so the only visible step is Touch ID, then completes the publish. An expired
+// verification, drives the ceremony in an invisible windowless WKWebView so
+// the only visible step is Touch ID, then completes the publish. An expired
 // or missing npm login session is handled automatically (extra touch).
 // login: just the web-login ceremony; persists the session token to npmrc.
 import { loginWithWebAuth, publishWithWebAuth, PublishError, type StatusEvent } from './engine.ts'
 import { notifyHuman } from './presenters/browser.ts'
-import { releaseChromePresenter } from './presenters/chrome.ts'
 import { selectPresenter, type PresenterName } from './presenters/select.ts'
+import { runSetup } from './setup.ts'
 
 const [, , command, ...rest] = process.argv
 
+if (command === 'setup') {
+  runSetup()
+  console.error('✓ setup complete — next: `keybridge login` (first run opens a window to log into npmjs.com once)')
+  process.exit(0)
+}
+
 if (command !== 'publish' && command !== 'login') {
-  console.error('usage: keybridge <publish|login> [--poll-timeout <sec>] [--presenter chrome|browser] [--] [npm args...]')
+  console.error('usage: keybridge <setup|publish|login> [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm args...]')
   process.exit(command === undefined || command === '--help' || command === '-h' ? 0 : 64)
 }
 
@@ -70,7 +77,3 @@ try {
     throw e
   }
 }
-
-// The warm Chrome (detached) outlives this process for the next invocation;
-// only the CDP socket must be released so the event loop can drain.
-releaseChromePresenter()

@@ -11,5 +11,5 @@
     "typescript/unified-signatures": "error",
     "no-empty": ["error", { "allowEmptyCatch": true }],
     "no-underscore-dangle": "off" },
-  "ignorePatterns": ["node_modules", "dist", "v2", "hooks", "keybridge-test", "_docs"]
+  "ignorePatterns": ["node_modules", "dist", "native", "hooks", "keybridge-test", "_docs"]
 }

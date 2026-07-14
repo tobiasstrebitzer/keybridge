@@ -4,11 +4,12 @@
 // to the signer; here we only shape clientDataJSON / authenticatorData /
 // attestationObject / COSE.
 import { createHash } from 'node:crypto'
-import cbor from './cbor.js'
+import { encode as cborEncode, type CborValue } from './cbor.ts'
+import type { Signer } from './signer.ts'
 
-const b64url = (buf) => Buffer.from(buf).toString('base64url')
+const b64url = (buf: Buffer | Uint8Array): string => Buffer.from(buf).toString('base64url')
 
-const rpIdHash = (rpId) => createHash('sha256').update(rpId, 'utf8').digest()
+const rpIdHash = (rpId: string): Buffer => createHash('sha256').update(rpId, 'utf8').digest()
 
 // flags byte: bit0 UP (user present), bit2 UV (user verified),
 // bit6 AT (attested credential data included)
@@ -16,7 +17,30 @@ const FLAG_UP = 0x01
 const FLAG_UV = 0x04
 const FLAG_AT = 0x40
 
-function clientDataJSON (type, challengeB64url, origin) {
+/** Serialized WebAuthn credential (all binary fields base64url strings). */
+export interface WireCredential {
+  id: string
+  rawId: string
+  type: 'public-key'
+  authenticatorAttachment: string
+  response: Record<string, unknown>
+}
+
+/** create() options after unwrap: binary fields are base64url strings. */
+export interface CreateOptions {
+  rp?: { id?: string }
+  user?: { id?: string }
+  challenge: string
+}
+
+/** get() options after unwrap: binary fields are base64url strings. */
+export interface GetOptions {
+  rpId?: string
+  challenge: string
+  allowCredentials?: Array<{ id: string }>
+}
+
+function clientDataJSON (type: string, challengeB64url: string, origin: string): Buffer {
   // `challenge` in clientDataJSON is the base64url of the raw challenge — the
   // page handed it to us already base64url-encoded, so pass it through.
   return Buffer.from(JSON.stringify({
@@ -27,9 +51,9 @@ function clientDataJSON (type, challengeB64url, origin) {
   }), 'utf8')
 }
 
-function cosePublicKey (x, y) {
+function cosePublicKey (x: Buffer, y: Buffer): Buffer {
   // COSE_Key for an ES256 (ECDSA P-256) public key
-  return cbor.encode(new Map([
+  return cborEncode(new Map<CborValue, CborValue>([
     [1, 2],   // kty: EC2
     [3, -7],  // alg: ES256
     [-1, 1],  // crv: P-256
@@ -38,7 +62,9 @@ function cosePublicKey (x, y) {
   ]))
 }
 
-function authenticatorData ({ rpId, flags, signCount, attestedCredentialData }) {
+function authenticatorData ({ rpId, flags, signCount, attestedCredentialData }: {
+  rpId: string, flags: number, signCount: number, attestedCredentialData?: Buffer,
+}): Buffer {
   const head = Buffer.alloc(37)
   rpIdHash(rpId).copy(head, 0)
   head[32] = flags
@@ -46,15 +72,16 @@ function authenticatorData ({ rpId, flags, signCount, attestedCredentialData }) 
   return attestedCredentialData ? Buffer.concat([head, attestedCredentialData]) : head
 }
 
-const rpIdFor = (explicit, origin) => explicit || new URL(origin).hostname
+const rpIdFor = (explicit: string | undefined, origin: string): string =>
+  explicit || new URL(origin).hostname
 
 // navigator.credentials.create() — registration
-export async function handleCreate (options, origin, signer) {
+export async function handleCreate (options: CreateOptions, origin: string, signer: Signer): Promise<WireCredential> {
   const rpId = rpIdFor(options.rp?.id, origin)
   const userHandle = options.user?.id ?? null // base64url string or null
 
   const cdj = clientDataJSON('webauthn.create', options.challenge, origin)
-  const { credId, publicKey } = await signer.register(rpId, userHandle)
+  const { credId, publicKey } = signer.register(rpId, userHandle)
 
   const aaguid = Buffer.alloc(16) // all zeros — self/none attestation
   const credIdLen = Buffer.alloc(2); credIdLen.writeUInt16BE(credId.length, 0)
@@ -64,7 +91,7 @@ export async function handleCreate (options, origin, signer) {
   const authData = authenticatorData({
     rpId, flags: FLAG_UP | FLAG_UV | FLAG_AT, signCount: 0, attestedCredentialData,
   })
-  const attestationObject = cbor.encode(new Map([
+  const attestationObject = cborEncode(new Map<CborValue, CborValue>([
     ['fmt', 'none'],
     ['attStmt', new Map()],
     ['authData', authData],
@@ -86,7 +113,7 @@ export async function handleCreate (options, origin, signer) {
 }
 
 // navigator.credentials.get() — authentication
-export async function handleGet (options, origin, signer) {
+export async function handleGet (options: GetOptions, origin: string, signer: Signer): Promise<WireCredential> {
   const rpId = rpIdFor(options.rpId, origin)
   const allowIds = (options.allowCredentials ?? []).map((c) => c.id) // base64url strings
 

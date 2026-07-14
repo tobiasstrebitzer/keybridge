@@ -5,83 +5,103 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { createHash, createPublicKey, createVerify, randomBytes } from 'node:crypto'
+import type { Signer } from '../src/signer.ts'
 
-// Redirect HOME BEFORE importing the host modules: signer.js captures
-// KB_DIR = join(homedir(), '.keybridge') at import time, so this must happen
-// first or the software signer would write into the real ~/.keybridge.
+// Redirect HOME BEFORE importing the signer (it captures ~/.keybridge at
+// import time), so the software signer writes into a throwaway store.
 const realHome = homedir()
-process.env.HOME = mkdtempSync(join(tmpdir(), 'kb-v2-inject-'))
+process.env.HOME = mkdtempSync(join(tmpdir(), 'kb-inject-'))
 process.env.KEYBRIDGE_BACKEND = 'software'
-test.after(() => { rmSync(process.env.HOME, { recursive: true, force: true }); process.env.HOME = realHome })
+test.after(() => { rmSync(process.env.HOME!, { recursive: true, force: true }); process.env.HOME = realHome })
 
-const { default: cbor } = await import('../host/cbor.js')
-const { handleCreate, handleGet } = await import('../host/webauthn.js')
-const { createSigner } = await import('../host/signer.js')
+const { decode } = await import('../src/cbor.ts')
+const { handleCreate, handleGet } = await import('../src/webauthn.ts')
+const { createSigner } = await import('../src/signer.ts')
+const { unwrap } = await import('../src/presenters/webkit.ts')
 
-const b64url = (b) => Buffer.from(b).toString('base64url')
+const b64url = (b: Buffer | Uint8Array): string => Buffer.from(b).toString('base64url')
 const HERE = dirname(fileURLToPath(import.meta.url))
-const INJECT_SRC = readFileSync(join(HERE, '../extension/inject.js'), 'utf8')
+const INJECT_SRC = readFileSync(join(HERE, '..', 'native', 'inject.js'), 'utf8')
 
-// The host's own {$b64:...} -> base64url reviver (mirrors keybridge-webauthn-host.js).
-function unwrap (v) {
-  if (v && typeof v === 'object' && typeof v.$b64 === 'string') return v.$b64
-  if (Array.isArray(v)) return v.map(unwrap)
-  if (v && typeof v === 'object') {
-    const o = {}
-    for (const k of Object.keys(v)) o[k] = unwrap(v[k])
-    return o
-  }
-  return v
-}
+/* eslint-disable  @typescript-eslint/no-explicit-any */
+type Any = any
 
 // Stub the native WebAuthn classes. Their prototype getters/methods THROW
 // "Illegal invocation" — exactly like the real browser classes when invoked on
-// an object lacking the internal slots. So if inject.js's mapped object fails to
-// define an own property that shadows one of these, reading it here blows up —
-// which is the precise failure mode we're guarding against.
+// an object lacking the internal slots. So if inject.js's mapped object fails
+// to define an own property that shadows one of these, reading it here blows
+// up — which is the precise failure mode we're guarding against.
+const illegal = (name: string) => () => { throw new TypeError(`Illegal invocation: ${name}`) }
+
 function makeNativeClasses () {
-  const illegal = (name) => () => { throw new TypeError(`Illegal invocation: ${name}`) }
-  const throwingGetters = (proto, names) => {
+  const throwingGetters = (proto: object, names: string[]) => {
     for (const n of names) Object.defineProperty(proto, n, { configurable: true, get: illegal(n) })
   }
-  const throwingMethods = (proto, names) => {
+  const throwingMethods = (proto: object, names: string[]) => {
     for (const n of names) Object.defineProperty(proto, n, { configurable: true, writable: true, value: illegal(n) })
   }
 
-  class PublicKeyCredential {}
+  // The index signature keeps TS from narrowing test objects to a member-less
+  // class after `assert.ok(x instanceof ...)` — the members are installed via
+  // defineProperty above, invisible to the type system.
+  class PublicKeyCredential {
+    [key: string]: Any
+    static isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false)
+    static isConditionalMediationAvailable = () => Promise.resolve(false)
+  }
   throwingGetters(PublicKeyCredential.prototype, ['id', 'rawId', 'type', 'response', 'authenticatorAttachment'])
   throwingMethods(PublicKeyCredential.prototype, ['getClientExtensionResults', 'toJSON'])
-  PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false)
-  PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false)
 
-  class AuthenticatorAttestationResponse {}
+  class AuthenticatorAttestationResponse { [key: string]: Any }
   throwingGetters(AuthenticatorAttestationResponse.prototype, ['clientDataJSON', 'attestationObject'])
   throwingMethods(AuthenticatorAttestationResponse.prototype,
     ['getAuthenticatorData', 'getPublicKey', 'getPublicKeyAlgorithm', 'getTransports'])
 
-  class AuthenticatorAssertionResponse {}
+  class AuthenticatorAssertionResponse { [key: string]: Any }
   throwingGetters(AuthenticatorAssertionResponse.prototype, ['clientDataJSON', 'authenticatorData', 'signature', 'userHandle'])
 
   return { PublicKeyCredential, AuthenticatorAttestationResponse, AuthenticatorAssertionResponse }
 }
 
-// Build a fake page `window` with a working postMessage event bus, load inject.js
-// into it, and wire a daemon that answers via the REAL host signing code — the
-// full page -> content -> host round trip, minus Chrome.
-// `realCreate`/`realGet` stub the page's native navigator.credentials (the
-// fallback target); `daemon` overrides the host round trip with a scripted
+interface WebAuthnBody { op: string, options: unknown, origin: string }
+
+// Build a fake page `window` with a webkit.messageHandlers transport (what the
+// WKWebView shell registers), load native/inject.js into it, and answer via
+// the REAL signing code — the full page → shell → parent round trip, minus
+// WebKit. `realCreate`/`realGet` stub the page's native navigator.credentials
+// (the fallback target); `daemon` overrides the round trip with a scripted
 // response for fault-injection tests.
-function loadInjectedPage (origin, signer, { realCreate, realGet, daemon } = {}) {
+function loadInjectedPage (origin: string, signer: Signer | null, {
+  realCreate, realGet, daemon,
+}: {
+  realCreate?: (options: unknown) => Promise<unknown>
+  realGet?: (options: unknown) => Promise<unknown>
+  daemon?: (body: WebAuthnBody) => Promise<{ ok: boolean, credential?: unknown, error?: string, code?: string }>
+} = {}) {
   const natives = makeNativeClasses()
-  const listeners = []
-  const window = {
+
+  // The WithReply handler: postMessage returns a Promise of the parent's
+  // response (mirrors WebShell.swift + the presenter's answerWebAuthn).
+  const postMessage = async (body: WebAuthnBody) => {
+    if (daemon) return daemon(body)
+    try {
+      const options = unwrap(body.options) as Any
+      const credential = body.op === 'create'
+        ? await handleCreate(options, body.origin, signer!)
+        : await handleGet(options, body.origin, signer!)
+      return { ok: true, credential }
+    } catch (err) {
+      const e = err as Error & { code?: string }
+      return { ok: false, error: String(e?.message ?? err), ...(e?.code ? { code: e.code } : {}) }
+    }
+  }
+
+  const window: Any = {
     location: { origin },
     ...natives,
-    addEventListener: (type, fn) => { if (type === 'message') listeners.push(fn) },
-    removeEventListener: (type, fn) => { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1) },
-    postMessage: (data) => { queueMicrotask(() => { for (const fn of listeners.slice()) fn({ source: window, data }) }) },
+    webkit: { messageHandlers: { keybridge: { postMessage } } },
   }
-  const navigator = {
+  const navigator: Any = {
     credentials: {
       create: realCreate ?? (async () => { throw new Error('real create should not be called') }),
       get: realGet ?? (async () => { throw new Error('real get should not be called') }),
@@ -91,33 +111,7 @@ function loadInjectedPage (origin, signer, { realCreate, realGet, daemon } = {})
   // Free identifiers `window`/`navigator` in inject.js bind to these params;
   // every other global (Object, ArrayBuffer, Promise, btoa, DOMException, ...)
   // resolves to the real Node global, so cross-realm identity holds.
-  // eslint-disable-next-line no-new-func
   new Function('window', 'navigator', INJECT_SRC)(window, navigator)
-
-  // Daemon: intercept inject's requests, sign with the host, post the result back.
-  window.addEventListener('message', async (e) => {
-    if (e.source !== window) return
-    const d = e.data
-    if (!d || d.source !== 'keybridge-inject') return
-    if (daemon) {
-      window.postMessage({ source: 'keybridge-content', id: d.id, resp: await daemon(d) })
-      return
-    }
-    try {
-      const options = unwrap(d.options)
-      const credential = d.op === 'create'
-        ? await handleCreate(options, d.origin, signer)
-        : await handleGet(options, d.origin, signer)
-      window.postMessage({ source: 'keybridge-content', id: d.id, resp: { ok: true, credential } })
-    } catch (err) {
-      // mirror keybridge-webauthn-host.js: `code` rides along with the error
-      window.postMessage({
-        source: 'keybridge-content',
-        id: d.id,
-        resp: { ok: false, error: String(err?.message ?? err), ...(err?.code ? { code: err.code } : {}) },
-      })
-    }
-  })
 
   return { window, navigator, natives }
 }
@@ -170,13 +164,13 @@ test('inject.js create/get: native prototypes, toJSON, and RP-verifiable crypto'
   assert.equal(regCdj.origin, origin)
 
   // Extract the registered public key from the attestation, RP-style.
-  const att = cbor.decode(Buffer.from(regJson.response.attestationObject, 'base64url'))
+  const att = decode(Buffer.from(regJson.response.attestationObject, 'base64url')) as Map<string, Buffer>
   assert.equal(att.get('fmt'), 'none')
-  const authData = att.get('authData')
+  const authData = att.get('authData')!
   const credIdLen = authData.readUInt16BE(53)
-  const cose = cbor.decode(authData.subarray(55 + credIdLen))
+  const cose = decode(authData.subarray(55 + credIdLen)) as Map<number, Buffer>
   const publicKey = createPublicKey({
-    key: { kty: 'EC', crv: 'P-256', x: b64url(cose.get(-2)), y: b64url(cose.get(-3)) },
+    key: { kty: 'EC', crv: 'P-256', x: b64url(cose.get(-2)!), y: b64url(cose.get(-3)!) },
     format: 'jwk',
   })
 
@@ -212,7 +206,7 @@ test('get() falls back to the real authenticator when keybridge has no credentia
   // Fresh store (fresh HOME) — no credential for npmjs.com exists.
   const signer = createSigner({ backend: 'software' })
   const sentinel = { native: 'assertion-from-real-authenticator' }
-  let realGetOptions = null
+  let realGetOptions: unknown = null
   const { navigator } = loadInjectedPage('https://www.npmjs.com', signer, {
     realGet: async (options) => { realGetOptions = options; return sentinel },
   })
@@ -229,9 +223,9 @@ test('get() falls back to the real authenticator when keybridge has no credentia
   assert.equal(realGetOptions, options, 'the ORIGINAL options object (live ArrayBuffers) must be passed through')
 })
 
-test('create() falls back to the real authenticator on a daemon ENOCRED', async () => {
+test('create() falls back to the real authenticator on an ENOCRED response', async () => {
   const sentinel = { native: 'attestation-from-real-authenticator' }
-  let realCreateOptions = null
+  let realCreateOptions: unknown = null
   const { navigator } = loadInjectedPage('https://www.npmjs.com', null, {
     daemon: async () => ({ ok: false, error: 'no keybridge credential', code: 'ENOCRED' }),
     realCreate: async (options) => { realCreateOptions = options; return sentinel },
@@ -243,7 +237,7 @@ test('create() falls back to the real authenticator on a daemon ENOCRED', async 
   assert.equal(realCreateOptions, options)
 })
 
-test('non-ENOCRED daemon errors still reject with NotAllowedError (no fallback)', async () => {
+test('non-ENOCRED errors still reject with NotAllowedError (no fallback)', async () => {
   let realGetCalled = false
   const { navigator } = loadInjectedPage('https://www.npmjs.com', null, {
     daemon: async () => ({ ok: false, error: 'signer exploded' }),
@@ -252,7 +246,7 @@ test('non-ENOCRED daemon errors still reject with NotAllowedError (no fallback)'
 
   await assert.rejects(
     navigator.credentials.get({ publicKey: { challenge: randomBytes(32), rpId: 'npmjs.com' } }),
-    (e) => e instanceof DOMException && e.name === 'NotAllowedError' && /signer exploded/.test(e.message)
+    (e: unknown) => e instanceof DOMException && e.name === 'NotAllowedError' && /signer exploded/.test((e as Error).message),
   )
   assert.equal(realGetCalled, false, 'genuine failures must NOT fall back')
 })

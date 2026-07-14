@@ -12,6 +12,6 @@
     "**/.symlinks": true,
     "**/.plugin_symlinks": true,
     "**/node_modules": true,
-    ".chrome-dev-profile": true
+    "**/dist": true
   }
 }
