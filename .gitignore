@@ -15,3 +15,7 @@ settings.local.json
 
 # npm artifacts (pnpm repo; the plugin launchers npm-install only inside the plugin cache)
 package-lock.json
+
+# roam-code local index
+.roam/
+.roamignore
