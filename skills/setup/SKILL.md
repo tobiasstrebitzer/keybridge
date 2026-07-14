@@ -42,7 +42,15 @@ software fallback, tell the user - publishes would not be Touch ID-gated.
 
 ## 3. First login + passkey enrollment (one-time, interactive)
 
-Explain to the user BEFORE running it what will happen, then run:
+Explain to the user BEFORE starting what will happen, then start the login.
+
+**Use the `NpmLogin` MCP tool (server: `keybridge`) - do NOT run the login
+through the Bash tool.** The login waits minutes for a human and must open a
+window; Bash-tool invocations run sandboxed with a short default timeout, and
+a window surfaced from that context may never reach the user. The MCP server
+is a regular process, so its ceremony window works. If the tool call isn't
+possible, have the USER run this in their own terminal instead (in Claude
+Code, prefixing with `!` works):
 
 ```sh
 <plugin-root>/scripts/keybridge.sh login
@@ -59,10 +67,10 @@ Explain to the user BEFORE running it what will happen, then run:
   to *Settings → Two-Factor Authentication → Add security key*, names it
   (e.g. "keybridge"), and approves with **Touch ID**. Their existing keys
   keep working; npm supports multiple.
-- If this first `login` run times out or errors after enrollment, that's
-  fine - the website session and the passkey are what mattered. Run
-  `login` once more: it should now complete **fully invisibly** with just a
-  Touch ID prompt.
+- If this first login run times out or errors after enrollment, that's
+  fine - the website session and the passkey are what mattered. Run the
+  login once more (`NpmLogin` again): it should now complete **fully
+  invisibly** with just a Touch ID prompt.
 
 ## 4. Verify
 
@@ -73,10 +81,16 @@ Explain to the user BEFORE running it what will happen, then run:
 
 ## Troubleshooting
 
-- **Ceremony stalls, Touch ID never appears**: run
-  `<plugin-root>/scripts/keybridge.sh login --presenter browser` to do the
-  ceremony in the default browser and confirm account state; also check that
-  `~/.keybridge/keybridge-webshell` exists (re-run step 2).
+- **Notifications appear but no window shows up**: the ceremony ran in a
+  context that can't display windows (e.g. a sandboxed shell). Have the user
+  run `<plugin-root>/scripts/keybridge.sh login` in their own terminal, or
+  retry via the `NpmLogin` MCP tool. If the helpers predate the current
+  plugin version, re-run step 2 first (rebuilds the shell).
+- **Ceremony stalls, Touch ID never appears**: have the user run
+  `<plugin-root>/scripts/keybridge.sh login --presenter browser` in their
+  terminal to do the ceremony in the default browser and confirm account
+  state; also check that `~/.keybridge/keybridge-webshell` exists (re-run
+  step 2).
 - **`npm session expired`** mid-publish is normal after ~12 h: keybridge
   re-runs login automatically (one extra touch). To avoid it, the user can
   put a granular npm access token *without* "bypass 2FA" in `~/.npmrc`.

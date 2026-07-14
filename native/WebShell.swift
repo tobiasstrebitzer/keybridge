@@ -132,11 +132,19 @@ final class Shell: NSObject, WKNavigationDelegate, WKScriptMessageHandlerWithRep
       w.title = "keybridge"
       w.isReleasedWhenClosed = false
       w.contentView = webView
-      w.center()
       window = w
     }
-    window?.makeKeyAndOrderFront(nil)
+    guard let w = window else { return }
+    w.center()
+    // We're a background process (often a child of an agent's shell) - macOS
+    // may deny NSApp.activate, which would leave a makeKeyAndOrderFront window
+    // buried behind everything. orderFrontRegardless + a floating level makes
+    // the window VISIBLE unconditionally; the user's first click makes it key.
+    w.level = .floating
+    w.orderFrontRegardless()
+    w.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
+    writeLine(["event": "surfaced", "visible": w.isVisible])
   }
 
   // MARK: WKNavigationDelegate

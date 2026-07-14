@@ -220,6 +220,9 @@ export class WebShell {
       case 'nav':
         this.#log(`page: ${msg.url}`)
         break
+      case 'surfaced':
+        this.#log(`ceremony window surfaced (visible: ${(msg as { visible?: boolean }).visible})`)
+        break
       case 'nav-error':
         this.#log(`navigation error: ${msg.error}`)
         break
