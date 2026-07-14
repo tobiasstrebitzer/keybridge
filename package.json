@@ -1,10 +1,27 @@
 {
   "name": "keybridge",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Safe WebAuthn bridge for npm publishing from agents: the agent initiates, the human approves via Touch ID - the ceremony runs in an invisible windowless WKWebView.",
-  "private": true,
   "license": "MIT",
   "type": "module",
+  "author": "Tobias Strebitzer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tobiasstrebitzer/keybridge.git"
+  },
+  "homepage": "https://github.com/tobiasstrebitzer/keybridge#readme",
+  "bugs": "https://github.com/tobiasstrebitzer/keybridge/issues",
+  "keywords": [
+    "npm-publish",
+    "webauthn",
+    "touch-id",
+    "secure-enclave",
+    "2fa",
+    "mcp",
+    "claude-code",
+    "agent",
+    "passkey"
+  ],
   "packageManager": "pnpm@11.8.0",
   "engines": {
     "node": ">=22.18"
@@ -21,6 +38,7 @@
     "build": "tsdown",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
     "typecheck": "tsc --noEmit",
+    "keybridge": "node src/cli.ts",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "test": "node --test \"tests/**/*.test.ts\"",
