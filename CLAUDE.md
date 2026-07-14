@@ -82,14 +82,15 @@ node src/cli.ts setup   # (re)build both Swift helpers into ~/.keybridge
 
 - check: `pnpm check`
 - test: `pnpm test`
-- push: no (repo not on a remote yet - user publishes to GitHub manually)
+- push: yes (origin https://github.com/tobiasstrebitzer/keybridge)
 - version_bump: no (pre-release; still `private: true`)
 - publish: no (flip `private` + pick a final name when ready; prepack rebuilds
   `dist/`)
 - docs: `README.md` (product) + this file (dev map); `_docs/` is gitignored
   session notes
+- co_authored_by: no - never add AI co-author or session trailers
+  (`Co-Authored-By: Claude…`, `Claude-Session:…`); attribution lives in
+  README's AI-disclosure note instead (history was rewritten once to enforce
+  this)
 - notes: npm tarball ships `dist/` + `native/` only (`files` whitelist);
   `dist/` must exist for `npm pack` (prepack rebuilds it)
-- commits: do NOT add AI co-author or session trailers (`Co-Authored-By:
-  Claude…`, `Claude-Session:…`) - attribution lives in README's AI-disclosure
-  note instead (user preference; history was rewritten once to enforce this)
