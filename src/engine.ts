@@ -1,5 +1,5 @@
 // Core engine: wraps `npm publish --json`, catches npm's EOTP web-auth error
-// (authUrl/doneUrl contract, npm CLI >= 11.6 / #8952), hands the WebAuthn
+// (authUrl/doneUrl contract, npm CLI >= 11.9 / #8952), hands the WebAuthn
 // ceremony to a presenter (off-screen Chrome, browser tab, ...), polls doneUrl
 // for the one-time token, and retries the publish with --otp=<token>.
 //
@@ -274,9 +274,10 @@ function readNpmrcKey (file: string, key: string): string | null {
   return null
 }
 
-// npm < 12 redacts the session ids in its --json error output (authUrl and
-// doneUrl arrive as ".../auth/cli/***" - @npmcli/redact runs over the JSON
-// payload; fixed in npm 12). When that happens the URLs are useless, so we
+// npm 11.9.0-11.14.x redact the session ids in their --json error output
+// (authUrl and doneUrl arrive as ".../auth/cli/***" - @npmcli/redact runs over
+// the JSON payload; fixed in 11.15.0; pre-11.9 omits the URLs entirely). When
+// the URLs are redacted or missing the error is useless, so we
 // mint a replacement web-auth session ourselves: a metadata-only PUT (no
 // tarball) to the package route with `npm-auth-type: web` makes the registry
 // create a fresh, live session and return unredacted URLs in the 401 body.

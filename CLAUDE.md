@@ -111,7 +111,8 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   can't pass the first-login 2FA check with that key in the keybridge window -
   the user must pick npm's "use a recovery code" fallback (or temporarily
   remove the old key first). Documented in README's install section.
-- npm 11.x redacts publish `authUrl`/`doneUrl` (`…/***`; fixed in npm 12) →
+- npm 11.9.0-11.14.x redact publish `authUrl`/`doneUrl` (`…/***`; fixed in
+  11.15.0; pre-11.9 omits the URLs entirely) →
   `engine.mintWebAuthSession` recovers unredacted URLs via a metadata-only
   `PUT` with `npm-auth-type: web`.
 - The SE signer shells out synchronously - the event loop stalls during the

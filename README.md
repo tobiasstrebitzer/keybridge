@@ -75,11 +75,13 @@ The plugin bundles the [MCP tools](#mcp-tools-claude-code) below, a
 
 ## Why
 
-npm requires web-based WebAuthn verification for every publish (classic tokens
-revoked Dec 2025, TOTP gone, bypass-2FA tokens losing publish rights ~Jan 2027).
+npm requires a web-based WebAuthn ceremony for interactive publishes on a
+2FA-protected account (classic tokens revoked Dec 2025, new TOTP setups
+disabled and existing ones being phased out, bypass-2FA tokens losing direct
+publish rights ~Jan 2027).
 Run non-interactively - in CI-less local automation, or by an agent like Claude
 Code - `npm publish` just dies with `EOTP`. keybridge picks up npm's own
-machine-readable hand-off (`authUrl`/`doneUrl`/`--otp`, npm CLI ≥ 11.6), drives
+machine-readable hand-off (`authUrl`/`doneUrl`/`--otp`, npm CLI ≥ 11.9), drives
 the verification page in an **invisible, windowless WKWebView**, and answers the
 WebAuthn ceremony from a **Secure Enclave key that only signs after Touch ID**.
 
@@ -291,8 +293,9 @@ follow the system).
 <details>
 <summary><b>npm 11.x caveat</b></summary>
 
-npm 11 redacts the session ids in its `--json` error output (`authUrl` arrives
-as `…/auth/cli/***`; fixed in npm 12). keybridge detects this and transparently
+npm 11.9.0 - 11.14.x redact the session ids in their `--json` error output
+(`authUrl` arrives as `…/auth/cli/***`; fixed in 11.15.0; before 11.9 the URLs
+are missing entirely). keybridge detects this and transparently
 mints its own web-auth session (a metadata-only `PUT` with
 `npm-auth-type: web`), which returns unredacted URLs - verified against
 registry.npmjs.org.
