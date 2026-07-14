@@ -53,6 +53,12 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   `WebShell.swift`), not in any browser profile. First run needs one manual
   npmjs.com login — the presenter auto-surfaces a window when it detects a
   password page, then never again.
+- **WKWebView has no real platform authenticator**, so the inject script's
+  `ENOCRED` fallback to the native `navigator.credentials` effectively fails
+  inside the shell. Consequence: an account with a pre-existing security key
+  can't pass the first-login 2FA check with that key in the keybridge window —
+  the user must pick npm's "use a recovery code" fallback (or temporarily
+  remove the old key first). Documented in README's install section.
 - npm 11.x redacts publish `authUrl`/`doneUrl` (`…/***`; fixed in npm 12) →
   `engine.mintWebAuthSession` recovers unredacted URLs via a metadata-only
   `PUT` with `npm-auth-type: web`.

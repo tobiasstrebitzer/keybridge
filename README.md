@@ -46,6 +46,21 @@ Then enroll and log in once:
    Secure Enclave passkey — your existing security keys keep working.)
 2. Every publish after that is invisible: `keybridge publish` → Touch ID → done.
 
+> **Already have a security key / passkey on your npm account?** Right after
+> the password step, npm will ask you to verify with it — but inside the
+> keybridge window that key is unreachable (WebAuthn there is wired to
+> keybridge's own signer; hardware keys and iCloud passkeys don't work in it).
+> Use npm's fallback on that screen instead: **"Use a recovery code"**. Once
+> you're in, add the keybridge security key under *Settings → Two-Factor
+> Authentication* as in step 1. You do **not** need to remove your existing
+> key — npm supports multiple keys, keybridge answers publish ceremonies with
+> its own, and your other key keeps working in your normal browser.
+>
+> No recovery codes at hand? Then avoid the prompt entirely: in your normal
+> browser, temporarily remove the old security key (*Settings → Two-Factor
+> Authentication*), run `keybridge login` (password only now), enroll the
+> keybridge key, and re-add your old key afterwards.
+
 ## Usage
 
 ```sh
