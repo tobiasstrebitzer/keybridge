@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "keybridge": {
+      "command": "node",
+      "args": ["./bin/keybridge-mcp.js"]
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "chrome-devtools-mcp@latest",
+        "--channel=stable",
+        "--userDataDir=/Users/atomic/projects/ai/security-key/.chrome-dev-profile",
+        "--categoryExtensions"
+      ]
+    }
+  }
+}

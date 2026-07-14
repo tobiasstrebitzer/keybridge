@@ -1,0 +1,18 @@
+{
+  "name": "keybridge-test",
+  "version": "0.0.6",
+  "description": "Throwaway stub package for testing keybridge's WebAuthn publish hand-off. Not useful — do not install.",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": [
+    "keybridge",
+    "test-fixture"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "index.js"
+  ]
+}

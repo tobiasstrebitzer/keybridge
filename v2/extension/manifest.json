@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "keybridge WebAuthn bridge (PoC)",
+  "version": "0.1.0",
+  "description": "Intercepts WebAuthn ceremonies and routes them to the local keybridge signing daemon (Secure Enclave + Touch ID).",
+  "permissions": ["nativeMessaging"],
+  "host_permissions": [
+    "https://webauthn.io/*",
+    "https://www.npmjs.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://webauthn.io/*", "https://www.npmjs.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["https://webauthn.io/*", "https://www.npmjs.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}

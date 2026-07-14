@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+.chrome-dev-profile/
+
+# per-user local Claude Code settings (not shared)
+settings.local.json
+
+# local machine state that lives under $HOME/.keybridge, never in-repo:
+# credentials.json, se-keys/, keybridge-se-signer, keybridge-launch.sh

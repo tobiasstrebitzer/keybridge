@@ -1,0 +1,29 @@
+{
+  "name": "keybridge",
+  "version": "0.1.0",
+  "description": "Safe WebAuthn bridge for npm publishing from agents: runs npm publish, hands the human-verification ceremony to you (browser tab or macOS auth sheet), then completes the publish.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20",
+    "npm": ">=11.6.0"
+  },
+  "bin": {
+    "keybridge": "bin/keybridge.js",
+    "keybridge-mcp": "bin/keybridge-mcp.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "hooks",
+    "skills",
+    ".claude-plugin",
+    ".mcp.json"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  }
+}
