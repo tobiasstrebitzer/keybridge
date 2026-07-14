@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// keybridge MCP server — the agent-facing entry point, on silkweave/stdio.
+// keybridge MCP server - the agent-facing entry point, on silkweave/stdio.
 // Tools: NpmPublish, NpmLogin. The server does all the browser driving
 // internally (Tier A off-screen Chrome); the model never sees a DOM and the
 // human's only involvement is the Touch ID tap.

@@ -7,7 +7,7 @@ description: Publish the current package to the npm registry through the keybrid
 
 npm requires human WebAuthn verification (security key or Touch ID) for
 publishing. This project routes publishes through the gated `keybridge`
-bridge — never run `npm publish` directly in Bash (a hook will deny it).
+bridge - never run `npm publish` directly in Bash (a hook will deny it).
 
 ## Steps
 
@@ -26,7 +26,7 @@ bridge — never run `npm publish` directly in Bash (a hook will deny it).
 
 ## Notes
 
-- The tool shows an approval card in Claude Code on every call — that is
+- The tool shows an approval card in Claude Code on every call - that is
   intentional (hardened by default). The user's WebAuthn touch is a second,
   non-bypassable gate.
 - Publishes only work from the project root (or a subdirectory passed as

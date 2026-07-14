@@ -108,7 +108,7 @@ export function runNpm (args: string[], { cwd, npmBin = 'npm', env }: RunNpmOpti
 // _authToken as protected (`npm config get` refuses to print it), so we
 // resolve it the way npm does: env var, then project .npmrc, then the
 // user config (--userconfig from npmArgs, or ~/.npmrc). Returns null when
-// no token is configured — doneUrl polling then runs unauthenticated.
+// no token is configured - doneUrl polling then runs unauthenticated.
 export async function getAuthToken (
   registryLikeUrl: string,
   { cwd = process.cwd(), npmArgs = [] }: { cwd?: string, npmArgs?: string[] } = {},
@@ -177,7 +177,7 @@ export interface LoginOptions {
   fetchImpl?: FetchLike
 }
 
-// Web-based login (what `npm login` does since Dec 2025 — yields a session
+// Web-based login (what `npm login` does since Dec 2025 - yields a session
 // token, currently ~12h): POST /-/v1/login with npm-auth-type: web, hand the
 // loginUrl to the human, poll doneUrl, persist the token.
 export async function loginWithWebAuth ({
@@ -249,7 +249,7 @@ function readNpmrcKey (file: string, key: string): string | null {
 }
 
 // npm < 12 redacts the session ids in its --json error output (authUrl and
-// doneUrl arrive as ".../auth/cli/***" — @npmcli/redact runs over the JSON
+// doneUrl arrive as ".../auth/cli/***" - @npmcli/redact runs over the JSON
 // payload; fixed in npm 12). When that happens the URLs are useless, so we
 // mint a replacement web-auth session ourselves: a metadata-only PUT (no
 // tarball) to the package route with `npm-auth-type: web` makes the registry
@@ -380,7 +380,7 @@ export async function publishWithWebAuth ({
 
   // Expired 12h session token or no login at all: run the web-login
   // ceremony, persist the fresh token, then start over (the publish itself
-  // will still demand its own 2FA verification — a second touch).
+  // will still demand its own 2FA verification - a second touch).
   if (autoLogin && (err?.code === 'ENEEDAUTH' || err?.code === 'E401')) {
     onStatus({ phase: 'login-required', code: err.code })
     await loginWithWebAuth({ cwd, npmBin, npmArgs, presenter, onStatus, pollTimeoutMs })

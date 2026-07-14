@@ -88,7 +88,7 @@ test('registration → authentication produces an RP-verifiable ES256 assertion'
   assert.equal(asr.id, cred.id)
   assert.equal(asr.response.userHandle, userHandle)
 
-  // The core proof: verify the signature exactly as an RP does —
+  // The core proof: verify the signature exactly as an RP does -
   // ECDSA/SHA-256 over (authenticatorData || SHA-256(clientDataJSON)).
   const authData = Buffer.from(asr.response.authenticatorData as string, 'base64url')
   const clientDataHash = createHash('sha256').update(Buffer.from(asr.response.clientDataJSON as string, 'base64url')).digest()

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// keybridge CLI — human-facing entry point.
+// keybridge CLI - human-facing entry point.
 //
 //   keybridge setup                                       # build native helpers, pick backend
 //   keybridge publish [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm publish args...]
@@ -19,7 +19,7 @@ const [, , command, ...rest] = process.argv
 
 if (command === 'setup') {
   runSetup()
-  console.error('✓ setup complete — next: `keybridge login` (first run opens a window to log into npmjs.com once)')
+  console.error('✓ setup complete - next: `keybridge login` (first run opens a window to log into npmjs.com once)')
   process.exit(0)
 }
 
@@ -45,17 +45,17 @@ const { name: presenterName, presenter } = selectPresenter(presenterChoice)
 
 const onStatus = ({ phase, authUrl, purpose, npmrc, code }: StatusEvent) => {
   if (phase === 'publish-attempt') console.error('· running npm publish ...')
-  if (phase === 'login-required') console.error(`· npm session expired or missing (${code}) — starting web login`)
-  if (phase === 'minting-session') console.error('· npm redacted the auth URLs (npm < 12) — minting a fresh web-auth session')
+  if (phase === 'login-required') console.error(`· npm session expired or missing (${code}) - starting web login`)
+  if (phase === 'minting-session') console.error('· npm redacted the auth URLs (npm < 12) - minting a fresh web-auth session')
   if (phase === 'awaiting-human') {
     const what = purpose === 'login' ? 'login verification' : 'publish verification'
-    console.error(`· npm requires human ${what} — presenting via ${presenterName}`)
+    console.error(`· npm requires human ${what} - presenting via ${presenterName}`)
     console.error(`  ${authUrl}`)
     console.error('  → touch your security key / Touch ID to approve')
     notifyHuman(`npm ${purpose === 'login' ? 'login' : 'publish'} is waiting for your security key / Touch ID approval`)
   }
-  if (phase === 'login-complete') console.error(`· logged in — session token saved to ${npmrc}`)
-  if (phase === 'publish-retry') console.error('· verified — completing publish ...')
+  if (phase === 'login-complete') console.error(`· logged in - session token saved to ${npmrc}`)
+  if (phase === 'publish-retry') console.error('· verified - completing publish ...')
 }
 
 try {

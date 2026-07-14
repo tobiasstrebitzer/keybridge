@@ -4,7 +4,7 @@ import { defineConfig } from 'tsdown'
 // runtime path math survives: presenters/webkit.ts and setup.ts resolve the
 // Swift sources via `join(HERE, '..', ..., 'native')`, which lands on the
 // package root only if dist mirrors src (dist/presenters/webkit.mjs -> ../../ = root).
-// Dependencies (@silkweave/*, zod) stay external — this is a package, not a bundle.
+// Dependencies (@silkweave/*, zod) stay external - this is a package, not a bundle.
 export default defineConfig({
   entry: ['src/**/*.ts'],
   format: 'esm',

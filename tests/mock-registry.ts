@@ -9,7 +9,7 @@
 //
 // With `redactPublishUrls` it also emulates the npm < 12 CLI bug where the
 // --json error output redacts the session ids: full publish PUTs (body with
-// _attachments) get "***" URLs — as the npm CLI would report them — while
+// _attachments) get "***" URLs - as the npm CLI would report them - while
 // metadata-only session-mint PUTs get real, live URLs.
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -72,7 +72,7 @@ export function startMockRegistry (
       state.authVisited = true
       if (completeAuthOnVisit) state.authComplete = true
       res.writeHead(200, { 'content-type': 'text/html' })
-      res.end('<html><body>WebAuthn ceremony placeholder — you have been "verified".</body></html>')
+      res.end('<html><body>WebAuthn ceremony placeholder - you have been "verified".</body></html>')
       return
     }
 

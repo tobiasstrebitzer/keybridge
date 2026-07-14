@@ -3,7 +3,7 @@
 // A P-256 keypair whose private key is generated inside the Secure Enclave and
 // gated so every signature requires user presence (Touch ID). Uses CryptoKit's
 // SecureEnclave API with an on-disk *wrapped* key blob rather than the
-// keychain — the blob is an opaque handle only this Mac's Secure Enclave can
+// keychain - the blob is an opaque handle only this Mac's Secure Enclave can
 // use, so no keychain-access-groups entitlement / provisioning profile is
 // needed (a plain, even ad-hoc-signed, CLI works).
 //
@@ -12,7 +12,7 @@
 //          prints {"x": base64, "y": base64} of the public point
 //   keybridge-se-signer sign --tag <tag> --message <base64> --reason <text>
 //       -> prompts for Touch ID, signs the message with ECDSA-P256/SHA-256,
-//          prints {"signature": base64}  (DER — what WebAuthn expects)
+//          prints {"signature": base64}  (DER - what WebAuthn expects)
 //   keybridge-se-signer probe
 //       -> creates + discards a throwaway SE key; {"ok": true} if usable
 //          (no Touch ID: key creation does not prompt)

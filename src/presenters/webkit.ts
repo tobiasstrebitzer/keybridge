@@ -1,5 +1,5 @@
 // The primary presenter (macOS): a WINDOWLESS WKWebView does the ceremony, so
-// nothing is ever on screen except Touch ID — no browser window exists at all
+// nothing is ever on screen except Touch ID - no browser window exists at all
 // (no launch animation, no Dock icon).
 //
 // The shell (native/WebShell.swift, compiled to ~/.keybridge/
@@ -103,7 +103,7 @@ export function unwrap (v: unknown): unknown {
 
 // Default ceremony responder. Note: the secure-enclave signer shells out
 // synchronously, so the event loop stalls while the human decides on Touch ID;
-// that's fine — the engine's doneUrl polling just resumes afterwards.
+// that's fine - the engine's doneUrl polling just resumes afterwards.
 async function answerWebAuthn (op: string, options: unknown, origin: string): Promise<WebAuthnResponse> {
   try {
     const signer = createSigner()
@@ -268,14 +268,14 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
       while (!signal.aborted) {
         const status = await shell.eval(STATUS_SCRIPT).catch(() => 'pending')
         if (status === 'clicked') {
-          o.log('ceremony triggered — waiting for Touch ID approval')
+          o.log('ceremony triggered - waiting for Touch ID approval')
           break
         }
         if (status === 'login-page' && o.surfaceOnLogin && !surfaced) {
           surfaced = true
-          o.log('npm wants a password login — surfacing the ceremony window')
+          o.log('npm wants a password login - surfacing the ceremony window')
           shell.send({ cmd: 'surface' })
-          o.notify('npm needs you to log in — a keybridge window has been opened')
+          o.notify('npm needs you to log in - a keybridge window has been opened')
         }
         await delay(o.pollIntervalMs, null, { signal }).catch(() => {})
       }

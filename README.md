@@ -1,19 +1,19 @@
 # keybridge
 
-Publish to npm with nothing but a Touch ID tap — including from agents.
+Publish to npm with nothing but a Touch ID tap - including from agents.
 
 ```
 $ keybridge publish
 · running npm publish ...
-· npm requires human publish verification — presenting via webkit
+· npm requires human publish verification - presenting via webkit
   → touch your security key / Touch ID to approve      👆 (the only visible step)
 ✓ published my-package@1.2.3
 ```
 
 npm requires web-based WebAuthn verification for every publish (classic tokens
 revoked Dec 2025, TOTP gone, bypass-2FA tokens losing publish rights ~Jan 2027).
-Run non-interactively — in CI-less local automation, or by an agent like Claude
-Code — `npm publish` just dies with `EOTP`. keybridge picks up npm's own
+Run non-interactively - in CI-less local automation, or by an agent like Claude
+Code - `npm publish` just dies with `EOTP`. keybridge picks up npm's own
 machine-readable hand-off (`authUrl`/`doneUrl`/`--otp`, npm CLI ≥ 11.6), drives
 the verification page in an **invisible, windowless WKWebView**, and answers the
 WebAuthn ceremony from a **Secure Enclave key that only signs after Touch ID**.
@@ -34,26 +34,26 @@ npm install -g keybridge     # or: git clone …/keybridge && cd keybridge && pn
 keybridge setup              # compiles the two tiny Swift helpers into ~/.keybridge
 ```
 
-(From a source checkout, `node src/cli.ts` works in place of `keybridge` —
+(From a source checkout, `node src/cli.ts` works in place of `keybridge` -
 Node ≥ 22.18 runs the TypeScript directly.)
 
 Then enroll and log in once:
 
-1. **Enroll the keybridge passkey on your npm account** — run
+1. **Enroll the keybridge passkey on your npm account** - run
    `keybridge login`: a window opens the first time so you can sign in to
    npmjs.com; go to *Settings → Two-Factor Authentication → Add security key*
    in that window, and approve with Touch ID. (keybridge registers its own
-   Secure Enclave passkey — your existing security keys keep working.)
+   Secure Enclave passkey - your existing security keys keep working.)
 2. Every publish after that is invisible: `keybridge publish` → Touch ID → done.
 
 > **Already have a security key / passkey on your npm account?** Right after
-> the password step, npm will ask you to verify with it — but inside the
+> the password step, npm will ask you to verify with it - but inside the
 > keybridge window that key is unreachable (WebAuthn there is wired to
 > keybridge's own signer; hardware keys and iCloud passkeys don't work in it).
 > Use npm's fallback on that screen instead: **"Use a recovery code"**. Once
 > you're in, add the keybridge security key under *Settings → Two-Factor
 > Authentication* as in step 1. You do **not** need to remove your existing
-> key — npm supports multiple keys, keybridge answers publish ceremonies with
+> key - npm supports multiple keys, keybridge answers publish ceremonies with
 > its own, and your other key keeps working in your normal browser.
 >
 > No recovery codes at hand? Then avoid the prompt entirely: in your normal
@@ -74,13 +74,13 @@ Expired sessions are handled automatically: a publish that hits `E401` runs the
 web-login ceremony first (one extra touch), persists the token to your npmrc,
 then completes the publish.
 
-**Tip — skip the 12-hour re-login cycle:** create a granular access token
+**Tip - skip the 12-hour re-login cycle:** create a granular access token
 *without* "bypass 2FA" (Settings → Access Tokens): up to 90 days, package-
 scoped, and every publish still requires your touch. Put it in `~/.npmrc` as
-`//registry.npmjs.org/:_authToken=npm_…`. Avoid bypass-2FA tokens — they remove
+`//registry.npmjs.org/:_authToken=npm_…`. Avoid bypass-2FA tokens - they remove
 the human gate.
 
-### Claude Code — MCP server
+### Claude Code - MCP server
 
 `.mcp.json` in your project:
 
@@ -93,10 +93,10 @@ the human gate.
 ```
 
 Claude gets two tools, `NpmPublish` and `NpmLogin`, with typed inputs only
-(`tag`, `access`, `dryRun`, `cwd`) — no free-form flag injection. The model
+(`tag`, `access`, `dryRun`, `cwd`) - no free-form flag injection. The model
 sees a small structured result, never a browser.
 
-### Claude Code — plugin
+### Claude Code - plugin
 
 This repo is also a Claude Code plugin (`claude --plugin-dir /path/to/keybridge`):
 the MCP server, a `PreToolUse` hook that denies raw `npm/pnpm/yarn publish` in
@@ -116,12 +116,12 @@ npm publish --json        fails with {"error":{"code":"EOTP","authUrl":…,"done
 ```
 
 Why a browser engine at all? `www.npmjs.com` sits behind Cloudflare bot
-management — a pure HTTP client is blocked before npm's auth layer is even
+management - a pure HTTP client is blocked before npm's auth layer is even
 reached. A real WebKit view passes cleanly (no challenge, even on a cold
 profile) and drives npm's real page JS, so nothing private is reverse-
 engineered. The WKWebView is never attached to a window: there is nothing to
 see, animate, or focus-steal. A window is created only if npm needs a password
-login (first run / expired website session), then never again — cookies persist
+login (first run / expired website session), then never again - cookies persist
 in a dedicated `WKWebsiteDataStore`.
 
 The signing key is generated **in the Secure Enclave**, is non-extractable, and
@@ -134,14 +134,14 @@ credential for a site, the ceremony is handed to the real authenticator.
 
 Two independent gates:
 
-1. **Agent permission gate** — `NpmPublish` is a normal MCP tool, so Claude
+1. **Agent permission gate** - `NpmPublish` is a normal MCP tool, so Claude
    Code's per-project permissions control whether the agent may *attempt* a
    publish. Tool inputs are typed; `cwd` cannot escape the project root. The
    Bash side-channel (`npm publish`) is closed by the plugin hook.
-2. **WebAuthn user presence** — npm's server demands a fresh assertion from
+2. **WebAuthn user presence** - npm's server demands a fresh assertion from
    your enrolled authenticator, and keybridge's authenticator only signs after
    Touch ID. No touch, no publish. This gate cannot be whitelisted, delegated,
-   or scripted away — it is the real security boundary.
+   or scripted away - it is the real security boundary.
 
 Local state lives in `~/.keybridge/`: `credentials.json` (public key metadata;
 private keys stay in the Secure Enclave), the two compiled helpers, and
@@ -160,7 +160,7 @@ Layout: `src/engine.ts` (npm publish/login orchestration),
 `src/webauthn.ts` + `src/signer.ts` + `src/cbor.ts` (the authenticator),
 `src/setup.ts`, `src/cli.ts`, `src/server.ts` (MCP), `src/actions/`
 (silkweave tool definitions); `native/` holds the two Swift helpers
-(`WebShell.swift` — windowless WKWebView shell, `SecureEnclaveSigner.swift`)
+(`WebShell.swift` - windowless WKWebView shell, `SecureEnclaveSigner.swift`)
 and `inject.js` (the page-world `navigator.credentials` override).
 
 Tests run against a mock registry that reproduces npmjs.com's exact CLI
@@ -176,13 +176,18 @@ Environment overrides: `KEYBRIDGE_PRESENTER=webkit|browser`,
 npm 11 redacts the session ids in its `--json` error output (`authUrl` arrives
 as `…/auth/cli/***`; fixed in npm 12). keybridge detects this and transparently
 mints its own web-auth session (a metadata-only `PUT` with
-`npm-auth-type: web`), which returns unredacted URLs — verified against
+`npm-auth-type: web`), which returns unredacted URLs - verified against
 registry.npmjs.org.
 
 ## Status
 
-Validated end-to-end against npm production (enroll, login, publish — real
+Validated end-to-end against npm production (enroll, login, publish - real
 Touch ID, invisible ceremony) on 2026-07-14. Not affiliated with npm/GitHub;
 uses npm's public CLI hand-off contract, no private APIs.
+
+**AI disclosure:** Claude Code (Anthropic) contributed substantially to this
+repository. All code has been human-reviewed, and the security-relevant
+behavior - key handling, WebAuthn assembly, the publish flow - has been
+human-verified end-to-end against npm production.
 
 MIT

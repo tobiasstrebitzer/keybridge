@@ -41,7 +41,7 @@ export interface GetOptions {
 }
 
 function clientDataJSON (type: string, challengeB64url: string, origin: string): Buffer {
-  // `challenge` in clientDataJSON is the base64url of the raw challenge — the
+  // `challenge` in clientDataJSON is the base64url of the raw challenge - the
   // page handed it to us already base64url-encoded, so pass it through.
   return Buffer.from(JSON.stringify({
     type,
@@ -75,7 +75,7 @@ function authenticatorData ({ rpId, flags, signCount, attestedCredentialData }: 
 const rpIdFor = (explicit: string | undefined, origin: string): string =>
   explicit || new URL(origin).hostname
 
-// navigator.credentials.create() — registration
+// navigator.credentials.create() - registration
 export async function handleCreate (options: CreateOptions, origin: string, signer: Signer): Promise<WireCredential> {
   const rpId = rpIdFor(options.rp?.id, origin)
   const userHandle = options.user?.id ?? null // base64url string or null
@@ -83,7 +83,7 @@ export async function handleCreate (options: CreateOptions, origin: string, sign
   const cdj = clientDataJSON('webauthn.create', options.challenge, origin)
   const { credId, publicKey } = signer.register(rpId, userHandle)
 
-  const aaguid = Buffer.alloc(16) // all zeros — self/none attestation
+  const aaguid = Buffer.alloc(16) // all zeros - self/none attestation
   const credIdLen = Buffer.alloc(2); credIdLen.writeUInt16BE(credId.length, 0)
   const attestedCredentialData = Buffer.concat([
     aaguid, credIdLen, credId, cosePublicKey(publicKey.x, publicKey.y),
@@ -112,7 +112,7 @@ export async function handleCreate (options: CreateOptions, origin: string, sign
   }
 }
 
-// navigator.credentials.get() — authentication
+// navigator.credentials.get() - authentication
 export async function handleGet (options: GetOptions, origin: string, signer: Signer): Promise<WireCredential> {
   const rpId = rpIdFor(options.rpId, origin)
   const allowIds = (options.allowCredentials ?? []).map((c) => c.id) // base64url strings

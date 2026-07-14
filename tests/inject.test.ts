@@ -27,10 +27,10 @@ const INJECT_SRC = readFileSync(join(HERE, '..', 'native', 'inject.js'), 'utf8')
 type Any = any
 
 // Stub the native WebAuthn classes. Their prototype getters/methods THROW
-// "Illegal invocation" — exactly like the real browser classes when invoked on
+// "Illegal invocation" - exactly like the real browser classes when invoked on
 // an object lacking the internal slots. So if inject.js's mapped object fails
 // to define an own property that shadows one of these, reading it here blows
-// up — which is the precise failure mode we're guarding against.
+// up - which is the precise failure mode we're guarding against.
 const illegal = (name: string) => () => { throw new TypeError(`Illegal invocation: ${name}`) }
 
 function makeNativeClasses () {
@@ -42,7 +42,7 @@ function makeNativeClasses () {
   }
 
   // The index signature keeps TS from narrowing test objects to a member-less
-  // class after `assert.ok(x instanceof ...)` — the members are installed via
+  // class after `assert.ok(x instanceof ...)` - the members are installed via
   // defineProperty above, invisible to the type system.
   class PublicKeyCredential {
     [key: string]: Any
@@ -67,7 +67,7 @@ interface WebAuthnBody { op: string, options: unknown, origin: string }
 
 // Build a fake page `window` with a webkit.messageHandlers transport (what the
 // WKWebView shell registers), load native/inject.js into it, and answer via
-// the REAL signing code — the full page → shell → parent round trip, minus
+// the REAL signing code - the full page → shell → parent round trip, minus
 // WebKit. `realCreate`/`realGet` stub the page's native navigator.credentials
 // (the fallback target); `daemon` overrides the round trip with a scripted
 // response for fault-injection tests.
@@ -203,7 +203,7 @@ test('inject.js create/get: native prototypes, toJSON, and RP-verifiable crypto'
 })
 
 test('get() falls back to the real authenticator when keybridge has no credential (ENOCRED)', async () => {
-  // Fresh store (fresh HOME) — no credential for npmjs.com exists.
+  // Fresh store (fresh HOME) - no credential for npmjs.com exists.
   const signer = createSigner({ backend: 'software' })
   const sentinel = { native: 'assertion-from-real-authenticator' }
   let realGetOptions: unknown = null

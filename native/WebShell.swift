@@ -1,6 +1,6 @@
 // keybridge web shell: a WINDOWLESS WKWebView driven by a parent process
 // (src/presenters/webkit.ts) over a JSON-lines stdio protocol. There is no
-// browser window at all — no launch animation, nothing in the Dock — until the
+// browser window at all - no launch animation, nothing in the Dock - until the
 // parent explicitly asks for `surface` (password login / cookie seeding).
 //
 // Probed live 2026-07-14: a windowless WKWebView with a Safari UA loads
@@ -47,7 +47,7 @@ guard let injectPath = argValue("--inject"),
   exit(2)
 }
 
-// Default persistent store id — the hex spells "keybridge". One fixed identity
+// Default persistent store id - the hex spells "keybridge". One fixed identity
 // so every invocation shares cookies (npm `wub` session; any cf_clearance).
 let defaultStoreId = "6b657962-7269-4467-8000-4b4579427231"
 let safariUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
@@ -123,7 +123,7 @@ final class Shell: NSObject, WKNavigationDelegate, WKScriptMessageHandlerWithRep
     }
   }
 
-  // The window is created lazily — in the happy path it never exists.
+  // The window is created lazily - in the happy path it never exists.
   func surface() {
     if window == nil {
       let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800),
@@ -150,7 +150,7 @@ final class Shell: NSObject, WKNavigationDelegate, WKScriptMessageHandlerWithRep
     writeLine(["event": "nav-error", "error": error.localizedDescription])
   }
 
-  // MARK: WKScriptMessageHandlerWithReply — navigator.credentials traffic
+  // MARK: WKScriptMessageHandlerWithReply - navigator.credentials traffic
   func userContentController(_ userContentController: WKUserContentController,
                              didReceive message: WKScriptMessage,
                              replyHandler: @escaping (Any?, String?) -> Void) {

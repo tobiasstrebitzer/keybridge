@@ -1,7 +1,7 @@
 // WKWebView user script (documentStart, page world): replace
 // navigator.credentials.create/get so WebAuthn ceremonies are answered by the
 // keybridge parent process instead of a real authenticator. This is the same
-// interception technique password managers (Bitwarden, 1Password) use — the
+// interception technique password managers (Bitwarden, 1Password) use - the
 // difference is where the signature comes from (the parent's Secure Enclave
 // signer). Transport: webkit.messageHandlers.keybridge is a WithReply handler,
 // so postMessage returns a Promise resolved with the parent's response (a
@@ -151,7 +151,7 @@
   // ENOCRED fallback kept for parity with the extension: if the parent has no
   // keybridge credential for this rpId, hand the ceremony to the real
   // navigator.credentials. (In a bare WKWebView the platform authenticator is
-  // generally unavailable, so this usually surfaces as the page's own error —
+  // generally unavailable, so this usually surfaces as the page's own error -
   // but the shell's profile is keybridge-dedicated, so it shouldn't trigger.)
   navigator.credentials.create = function (options) {
     if (!options || !options.publicKey) return realCreate(options)

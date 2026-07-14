@@ -1,4 +1,4 @@
-// `keybridge setup` — compile the native helpers into ~/.keybridge and pick a
+// `keybridge setup` - compile the native helpers into ~/.keybridge and pick a
 // signing backend. Safe to re-run anytime (existing credentials are untouched).
 //
 //   keybridge-se-signer   Secure Enclave P-256 signer (Touch ID gates every
@@ -9,7 +9,7 @@
 //   config.json           { backend: 'secure-enclave' | 'software' }
 //
 // The CryptoKit SecureEnclave API stores an on-disk key blob rather than a
-// keychain item, so no entitlement or provisioning profile is required — an
+// keychain item, so no entitlement or provisioning profile is required - an
 // ad-hoc-signed binary works.
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -46,7 +46,7 @@ export function runSetup ({
     return { backend: backend ?? 'software', helperPath: null, shellPath: null }
   }
 
-  // 1. Secure Enclave signer — determines the backend.
+  // 1. Secure Enclave signer - determines the backend.
   const helperPath = join(KB_DIR, 'keybridge-se-signer')
   if (!backend) {
     try {
@@ -54,10 +54,10 @@ export function runSetup ({
       log('• probing Secure Enclave (creates a throwaway key) ...')
       if (!selfTestBackend(helperPath)) throw new Error('probe failed')
       backend = 'secure-enclave'
-      log('  ✓ Secure Enclave available — every signature will require Touch ID')
+      log('  ✓ Secure Enclave available - every signature will require Touch ID')
     } catch (e) {
       backend = 'software'
-      log(`  ! Secure Enclave not usable (${String((e as Error).message).split('\n')[0]}) — falling back to software backend`)
+      log(`  ! Secure Enclave not usable (${String((e as Error).message).split('\n')[0]}) - falling back to software backend`)
     }
   }
 
@@ -67,7 +67,7 @@ export function runSetup ({
     buildSwift(join(NATIVE_DIR, 'WebShell.swift'), shellPath, log)
   } catch (e) {
     shellPath = null
-    log(`  ! web shell build failed (${String((e as Error).message).split('\n')[0]}) — the default-browser presenter will be used`)
+    log(`  ! web shell build failed (${String((e as Error).message).split('\n')[0]}) - the default-browser presenter will be used`)
   }
 
   writeFileSync(join(KB_DIR, 'config.json'), JSON.stringify({ backend }, null, 2))

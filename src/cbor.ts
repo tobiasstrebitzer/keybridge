@@ -1,4 +1,4 @@
-// Minimal CBOR (RFC 8949) encoder/decoder — just the subset WebAuthn needs:
+// Minimal CBOR (RFC 8949) encoder/decoder - just the subset WebAuthn needs:
 // unsigned ints, negative ints, byte strings, text strings, arrays, maps.
 // Maps encode/decode as JS Map so integer keys (COSE) survive.
 

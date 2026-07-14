@@ -8,7 +8,7 @@
 //  - The WebAuthn touch itself is the non-bypassable second gate. (The v1
 //    server also set _meta["anthropic/requiresUserInteraction"]; silkweave's
 //    registrar doesn't forward custom tool _meta, so that hint is currently
-//    dropped — an acceptable loss since the touch still gates the publish.)
+//    dropped - an acceptable loss since the touch still gates the publish.)
 import { createAction, type Logger, type SilkweaveContext } from '@silkweave/core'
 import { resolve, sep } from 'node:path'
 import { z } from 'zod/v4'
@@ -52,7 +52,7 @@ export const NpmPublishAction = createAction({
     'Publish the npm package in the current project to the npm registry.',
     'npm requires human WebAuthn verification: the user will be prompted to',
     'touch their security key or Touch ID before the publish completes',
-    '(driven through an invisible off-screen browser — only Touch ID is shown).',
+    '(driven through an invisible off-screen browser - only Touch ID is shown).',
     'If the npm login session is missing or expired, a web-login ceremony',
     'runs first automatically (the user touches twice in total).',
     'Blocks until the user approves (or a timeout). Use dryRun to validate',

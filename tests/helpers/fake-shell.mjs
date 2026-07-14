@@ -5,7 +5,7 @@
 //
 //   FAKE_EVALS    comma-separated values returned by successive eval commands
 //                 (falls back to "not-found" when exhausted)
-//   FAKE_WEBAUTHN JSON {op, options, origin} — emitted as a webauthn event
+//   FAKE_WEBAUTHN JSON {op, options, origin} - emitted as a webauthn event
 //                 (id 99) right after the first navigate command
 //   FAKE_LOG      file that every received command line is appended to
 import { appendFileSync } from 'node:fs'

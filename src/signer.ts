@@ -5,7 +5,7 @@
 //     non-extractable, every signature gated by Touch ID (via the Swift
 //     helper built by `keybridge setup`). The intended production backend.
 //   - software: private key is a normal P-256 key stored (PEM) in the store
-//     file. No hardware gate — used for tests and non-macOS machines.
+//     file. No hardware gate - used for tests and non-macOS machines.
 //
 // The store lives at ~/.keybridge/credentials.json. Public keys are stored
 // base64url; the software backend additionally stores the private key PEM.

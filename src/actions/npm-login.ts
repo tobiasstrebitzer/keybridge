@@ -24,7 +24,7 @@ export const NpmLoginAction = createAction({
     'Log in to the npm registry via the web-auth ceremony. The user approves',
     'with their security key or Touch ID (driven through an invisible',
     'off-screen browser); the ~12h session token is persisted to their npmrc.',
-    'Publishing does this automatically when needed — call this only to',
+    'Publishing does this automatically when needed - call this only to',
     'pre-authenticate explicitly.',
   ].join(' '),
   input,

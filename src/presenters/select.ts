@@ -1,5 +1,5 @@
 // Presenter selection: the windowless WKWebView shell is the default on
-// macOS — no browser window ever exists, only Touch ID is visible. Everywhere
+// macOS - no browser window ever exists, only Touch ID is visible. Everywhere
 // else (or with KEYBRIDGE_PRESENTER=browser) fall back to opening the default
 // browser, where the ceremony needs whatever authenticator the user has there.
 import { execFileSync } from 'node:child_process'

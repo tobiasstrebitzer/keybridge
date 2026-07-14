@@ -71,7 +71,7 @@ test('drives the ceremony: navigate, poll, click, teardown on abort', async (t) 
   })
   abort.abort()
   await presentation
-  // close is written to the shell's stdin after the presenter resolves — wait
+  // close is written to the shell's stdin after the presenter resolves - wait
   // for the fake shell to log it before asserting on the command stream.
   await until(() => run.commands().some((c) => c.cmd === 'close'))
 
