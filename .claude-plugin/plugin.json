@@ -1,5 +1,15 @@
 {
   "name": "keybridge",
-  "description": "Safe WebAuthn bridge for npm publishing: Claude initiates the publish, you approve with your security key or Touch ID. Raw `npm publish` in Bash is blocked in favor of the gated bridge tool.",
-  "version": "0.2.0"
+  "displayName": "keybridge",
+  "version": "0.2.0",
+  "description": "Publish to npm with nothing but a Touch ID tap: Claude initiates the publish, you approve via WebAuthn. Raw `npm publish` in Bash is blocked in favor of the gated bridge tool.",
+  "author": {
+    "name": "Tobias Strebitzer",
+    "url": "https://github.com/tobiasstrebitzer"
+  },
+  "homepage": "https://github.com/tobiasstrebitzer/keybridge",
+  "repository": "https://github.com/tobiasstrebitzer/keybridge",
+  "license": "MIT",
+  "keywords": ["npm", "publish", "webauthn", "touch-id", "security", "mcp"],
+  "mcpServers": "./.claude-plugin/mcp.json"
 }

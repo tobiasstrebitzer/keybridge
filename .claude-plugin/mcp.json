@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "keybridge": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/keybridge-mcp.sh"
+    }
+  }
+}

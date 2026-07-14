@@ -28,7 +28,7 @@ if (PUBLISH_RE.test(command)) {
       permissionDecision: 'deny',
       permissionDecisionReason:
         'Raw `npm publish` is gated in this project. Use the keybridge MCP tool ' +
-        '`npm_publish` instead - it walks the user through WebAuthn verification ' +
+        '`NpmPublish` instead - it walks the user through WebAuthn verification ' +
         '(security key / Touch ID) and requires their explicit approval.',
     },
   }))

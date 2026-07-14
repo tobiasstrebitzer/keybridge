@@ -18,9 +18,10 @@ bridge - never run `npm publish` directly in Bash (a hook will deny it).
 3. Call the `NpmPublish` MCP tool (server: `keybridge`). Pass `tag` /
    `access` only when the user asked for non-defaults.
 4. Tell the user what to expect: on macOS the ceremony runs in an invisible
-   off-screen Chrome, so the **only** visible step is the Touch ID / security
-   key prompt (on other platforms a browser tab opens instead). The tool
-   blocks until they approve (5 minute timeout).
+   windowless WKWebView, so the **only** visible step is the Touch ID prompt
+   (on other platforms a browser tab opens instead). The tool blocks until
+   they approve (5 minute timeout). If keybridge was never set up on this
+   machine, run `/keybridge:setup` first.
 5. Report the result: package id and version on success; on failure, relay
    the npm error summary.
 

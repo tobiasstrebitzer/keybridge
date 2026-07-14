@@ -31,9 +31,18 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   `inject.js` (page-world `navigator.credentials` override over
   `webkit.messageHandlers`, Bitwarden-style `ENOCRED` fallback to the real
   authenticator), `SecureEnclaveSigner.swift`.
-- `hooks/`, `skills/`, `.claude-plugin/`, `.mcp.json` - the Claude plugin
-  (deny raw `npm publish` in Bash; `.mcp.json` points at `src/server.ts`
-  native-TS for local use and is not shipped).
+- `hooks/`, `skills/`, `.claude-plugin/`, `scripts/`, `.mcp.json` - the Claude
+  plugin; the repo is its own marketplace (`claude plugin marketplace add
+  tobiasstrebitzer/keybridge` → `claude plugin install keybridge@keybridge`).
+  Skills: `/keybridge:setup` (guided install) + `/keybridge:npm-publish`; hook
+  denies raw `npm publish` in Bash. **Two MCP configs on purpose**: root
+  `.mcp.json` (project/dev context, runs `src/server.ts` from the checkout)
+  vs `.claude-plugin/mcp.json` (plugin context, referenced by plugin.json's
+  `mcpServers`) → `scripts/keybridge-mcp.sh`, which self-bootstraps in the
+  plugin cache (a bare clone: `npm install --omit=dev` once, then native-TS
+  `src/server.ts`; install output must go to stderr - stdout is the MCP
+  channel). `scripts/keybridge.sh` is the same bootstrap for the CLI, used by
+  the setup skill.
 - `tests/` - `node --test`, all TS. `mock-registry.ts` reproduces npmjs.com's
   CLI contract; `helpers/fake-shell.mjs` mimics the WKWebView shell's stdio
   protocol; `inject.test.ts` runs `native/inject.js` against throwing stub

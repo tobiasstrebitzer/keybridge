@@ -1,0 +1,86 @@
+---
+name: setup
+description: Set up the keybridge npm Touch ID bridge on this Mac - compile the native helpers, log in to npm, and enroll the keybridge passkey. Use when the user asks to set up or configure keybridge, or when NpmPublish/NpmLogin fail because setup hasn't been done yet.
+---
+
+# keybridge setup (guided)
+
+Walk the user from a fresh plugin install to invisible Touch ID publishes.
+Everything below runs locally; the only account interaction is one login to
+npmjs.com and adding a security key there.
+
+**The keybridge CLI:** this skill lives at `<plugin>/skills/setup/`, so the
+plugin root is two directories up from this skill's base directory. Run the
+CLI through the bundled launcher (it self-installs its dependencies on first
+run):
+
+```sh
+<plugin-root>/scripts/keybridge.sh <setup|login|publish> [args...]
+```
+
+(In a source checkout of the keybridge repo, `node src/cli.ts` works too.)
+
+## 1. Preflight
+
+Check, and tell the user what's missing rather than failing cryptically:
+
+- `uname` is `Darwin` - keybridge needs macOS (Secure Enclave + WKWebView).
+- `node --version` is >= 22.18 (native TypeScript execution).
+- `xcode-select -p` succeeds - otherwise have the user run
+  `xcode-select --install` and wait for it to finish.
+
+## 2. Compile the native helpers
+
+```sh
+<plugin-root>/scripts/keybridge.sh setup
+```
+
+Builds two small Swift binaries into `~/.keybridge/` (Secure Enclave signer +
+the windowless WKWebView ceremony shell) and probes the Enclave. Expect
+`backend: secure-enclave` on Apple Silicon / T2 Macs. If it reports the
+software fallback, tell the user - publishes would not be Touch ID-gated.
+
+## 3. First login + passkey enrollment (one-time, interactive)
+
+Explain to the user BEFORE running it what will happen, then run:
+
+```sh
+<plugin-root>/scripts/keybridge.sh login
+```
+
+- A **keybridge window opens** (first run only): the user logs in to
+  npmjs.com with their password.
+- **If npm asks them to verify with an existing security key or passkey**:
+  that key cannot work inside the keybridge window - tell the user to click
+  npm's **"Use a recovery code"** fallback on that screen instead. (No
+  recovery codes? They can temporarily remove the old security key from their
+  normal browser first, and re-add it after enrollment.)
+- **Enroll the keybridge passkey** while that window is open: the user goes
+  to *Settings → Two-Factor Authentication → Add security key*, names it
+  (e.g. "keybridge"), and approves with **Touch ID**. Their existing keys
+  keep working; npm supports multiple.
+- If this first `login` run times out or errors after enrollment, that's
+  fine - the website session and the passkey are what mattered. Run
+  `login` once more: it should now complete **fully invisibly** with just a
+  Touch ID prompt.
+
+## 4. Verify
+
+- Call the `NpmPublish` MCP tool with `dryRun: true` in a publishable
+  project - validates packaging with no ceremony.
+- Optionally do a real publish (`NpmPublish`, or `/keybridge:npm-publish`):
+  the only visible step must be the Touch ID dialog.
+
+## Troubleshooting
+
+- **Ceremony stalls, Touch ID never appears**: run
+  `<plugin-root>/scripts/keybridge.sh login --presenter browser` to do the
+  ceremony in the default browser and confirm account state; also check that
+  `~/.keybridge/keybridge-webshell` exists (re-run step 2).
+- **`npm session expired`** mid-publish is normal after ~12 h: keybridge
+  re-runs login automatically (one extra touch). To avoid it, the user can
+  put a granular npm access token *without* "bypass 2FA" in `~/.npmrc`.
+- State lives in `~/.keybridge/` (helpers, `credentials.json`,
+  `config.json`); deleting that directory and re-running this skill resets
+  everything except the passkey on the npm account (remove that under
+  *Settings → Two-Factor Authentication*).

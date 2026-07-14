@@ -1,0 +1,17 @@
+{
+  "name": "keybridge",
+  "owner": {
+    "name": "Tobias Strebitzer"
+  },
+  "plugins": [
+    {
+      "name": "keybridge",
+      "source": "./",
+      "description": "Publish to npm with nothing but a Touch ID tap: Claude initiates the publish, you approve via WebAuthn. Raw `npm publish` in Bash is blocked in favor of the gated bridge tool.",
+      "homepage": "https://github.com/tobiasstrebitzer/keybridge",
+      "repository": "https://github.com/tobiasstrebitzer/keybridge",
+      "license": "MIT",
+      "keywords": ["npm", "publish", "webauthn", "touch-id", "security", "mcp"]
+    }
+  ]
+}

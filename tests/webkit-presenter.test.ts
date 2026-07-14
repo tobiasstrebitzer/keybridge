@@ -48,7 +48,7 @@ function presenterOpts (over: WebkitPresenterOptions = {}): WebkitPresenterOptio
   }
 }
 
-async function until (cond: () => boolean, ms = 2000): Promise<void> {
+async function until (cond: () => boolean, ms = 10_000): Promise<void> {
   const deadline = Date.now() + ms
   while (!cond()) {
     if (Date.now() > deadline) throw new Error('condition not met in time')

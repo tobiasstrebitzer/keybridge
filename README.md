@@ -24,7 +24,24 @@ ceremony, never the ceremony itself. The agent initiates; **you** approve.
 **macOS only** (Secure Enclave + WKWebView). On other platforms the ceremony
 falls back to your default browser.
 
-## Install
+## Quickstart (Claude Code plugin)
+
+```sh
+claude plugin marketplace add tobiasstrebitzer/keybridge
+claude plugin install keybridge@keybridge
+```
+
+Then, inside Claude Code, run **`/keybridge:setup`** - it checks the
+prerequisites, compiles the native helpers, and walks you through the one-time
+npm login + passkey enrollment (including the case where your account already
+has a security key). From then on, asking Claude to "publish this package" is:
+approval card → Touch ID → published.
+
+The plugin bundles the `NpmPublish` / `NpmLogin` MCP tools (typed inputs, no
+flag injection), a `PreToolUse` hook that blocks raw `npm/pnpm/yarn publish`
+in Bash, and the `/keybridge:setup` + `/keybridge:npm-publish` skills.
+
+## Install (standalone CLI)
 
 Requires macOS with Node ≥ 22.18 and the Xcode Command Line Tools
 (`xcode-select --install`).
@@ -98,9 +115,9 @@ sees a small structured result, never a browser.
 
 ### Claude Code - plugin
 
-This repo is also a Claude Code plugin (`claude --plugin-dir /path/to/keybridge`):
-the MCP server, a `PreToolUse` hook that denies raw `npm/pnpm/yarn publish` in
-Bash (steering Claude to the gated tool), and an `npm-publish` skill.
+The Quickstart above is the plugin path (this repo is its own plugin
+marketplace - `.claude-plugin/marketplace.json`). For hacking on keybridge
+itself, a local checkout also works: `claude --plugin-dir /path/to/keybridge`.
 
 ## How it works
 
