@@ -72,8 +72,12 @@ export function configFlags (npmArgs: string[] = []): string[] {
   const flags: string[] = []
   for (let i = 0; i < npmArgs.length; i++) {
     const a = npmArgs[i]!
-    if (a === '--registry' || a === '--userconfig') flags.push(a, npmArgs[++i]!)
-    else if (a.startsWith('--registry=') || a.startsWith('--userconfig=')) flags.push(a)
+    if (a === '--registry' || a === '--userconfig') {
+      // A trailing flag with no value would push undefined into spawn args
+      // (a TypeError) - let npm report the missing value instead.
+      const value = npmArgs[++i]
+      if (value !== undefined) flags.push(a, value)
+    } else if (a.startsWith('--registry=') || a.startsWith('--userconfig=')) flags.push(a)
   }
   return flags
 }
@@ -280,18 +284,20 @@ export async function loginAs (username: string | undefined, opts: LoginAsOption
       webkit: { storeId, ...(expected ? { prefillUsername: expected } : {}) },
     }).presenter
 
+  // NOTE: bindAfterLogin heals the freshest assertion marker (<=15 min) onto
+  // whoever this login confirms. The marker may predate the login (that is
+  // by design - assertions and logins are seconds apart in practice), which
+  // leaves one narrow mis-stamp window: a mediated publish as account A
+  // followed within 15 min by a ceremony-less login as account B would stamp
+  // A's credential with B's name. Self-heals on B's next real ceremony.
   const { registry: usedRegistry, npmrc, token } = await loginWithWebAuth({
     registry, cwd, npmBin, npmArgs, presenter, onStatus, pollTimeoutMs, fetchImpl,
   })
 
-  const actual = await whoami(opts)
+  const actual = await bindAfterLogin(storeId, opts, { token, registry: usedRegistry })
   if (!actual) {
     throw new PublishError('login completed but `npm whoami` could not confirm the account', { code: 'EIDENTITY' })
   }
-  bindAccount(actual, storeId)
-  const asserted = takeLastAsserted()
-  if (asserted) stampUsername([asserted], actual)
-  saveToken(actual, { token, registry: usedRegistry, kind: 'web' })
 
   if (username && actual !== username) {
     throw new PublishError(

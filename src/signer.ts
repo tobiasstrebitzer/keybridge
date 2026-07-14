@@ -20,9 +20,10 @@ const STORE = join(KB_DIR, 'credentials.json')
 
 // The macOS Touch ID dialog titles itself with the calling binary's name, so
 // the helper is deliberately named for humans. Pre-rename installs still
-// have the old binary until `keybridge setup` runs again.
-const SE_HELPER = join(KB_DIR, 'KeyBridge Agent')
-const SE_HELPER_LEGACY = join(KB_DIR, 'keybridge-se-signer')
+// have an old binary until `keybridge setup` runs again.
+const SE_HELPER = join(KB_DIR, 'KeyBridge')
+const SE_HELPER_LEGACY = [join(KB_DIR, 'KeyBridge Agent'), join(KB_DIR, 'keybridge-se-signer')]
+const defaultHelperPath = (): string => [SE_HELPER, ...SE_HELPER_LEGACY].find(existsSync) ?? SE_HELPER
 
 const b64url = (buf: Buffer | Uint8Array): string => Buffer.from(buf).toString('base64url')
 const fromB64url = (s: string): Buffer => Buffer.from(s, 'base64url')
@@ -74,7 +75,7 @@ export function resolveBackend (): string {
 
 export function createSigner ({
   backend = resolveBackend(),
-  helperPath = existsSync(SE_HELPER) || !existsSync(SE_HELPER_LEGACY) ? SE_HELPER : SE_HELPER_LEGACY,
+  helperPath = defaultHelperPath(),
 }: { backend?: string, helperPath?: string } = {}): Signer {
   const seCreate = (keyTag: string): { x: Buffer, y: Buffer } => {
     const out = execFileSync(helperPath, ['create', '--tag', keyTag], { encoding: 'utf8' })

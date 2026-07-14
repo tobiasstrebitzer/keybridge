@@ -142,11 +142,14 @@ export const NpmPublishAction = createAction({
     // the binding (without stealing the active pointer).
     if (mediation && outcome.usedWebAuth) bindAccount(mediation.user, storeId, { activate: false })
 
+    // npm can exit 0 without a publish result; mirror the CLI and never claim
+    // a publish that has no package id to show for it.
+    const pkg = outcome.result?.id ?? outcome.result?.name ?? null
     return {
-      published: !dryRun,
+      published: !dryRun && pkg !== null,
       dryRun: Boolean(dryRun),
       usedWebAuth: outcome.usedWebAuth,
-      package: outcome.result?.id ?? outcome.result?.name ?? null,
+      package: pkg,
       // When the publish auto-logged-in, the identity was unknown up front -
       // report who it actually ran as.
       user: publishUser ?? await whoami({ cwd, npmArgs }),

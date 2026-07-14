@@ -1,7 +1,7 @@
 // Core engine: wraps `npm publish --json`, catches npm's EOTP web-auth error
 // (authUrl/doneUrl contract, npm CLI >= 11.9 / #8952), hands the WebAuthn
-// ceremony to a presenter (off-screen Chrome, browser tab, ...), polls doneUrl
-// for the one-time token, and retries the publish with --otp=<token>.
+// ceremony to a presenter (windowless WKWebView, browser tab, ...), polls
+// doneUrl for the one-time token, and retries the publish with --otp=<token>.
 //
 // The doneUrl polling protocol mirrors npm-profile's webAuthCheckLogin:
 //   GET doneUrl -> 202 + retry-after header while pending
@@ -230,27 +230,7 @@ export async function loginWithWebAuth ({
   const { loginUrl, doneUrl } = body
 
   onStatus({ phase: 'awaiting-human', authUrl: loginUrl, purpose: 'login' })
-  const presenterAbort = new AbortController()
-  const pollAbort = new AbortController()
-  let presenterError: Error | null = null
-  const presentation = Promise.resolve()
-    .then(() => presenter({ authUrl: loginUrl, signal: presenterAbort.signal }))
-    // Only a fatal presenter failure stops the poll: a non-fatal one (e.g.
-    // the browser fallback failing to open) still leaves the human able to
-    // complete the ceremony by visiting authUrl themselves.
-    .catch((e: Error) => { presenterError = e; if ((e as PublishError).fatal) pollAbort.abort() })
-
-  let token: string
-  try {
-    token = await pollDoneUrl(doneUrl, { timeoutMs: pollTimeoutMs, signal: pollAbort.signal, fetchImpl })
-  } catch (e) {
-    if ((presenterError as PublishError | null)?.fatal) throw presenterError
-    if (presenterError && e instanceof Error) e.message += ` (presenter also failed: ${(presenterError as Error).message})`
-    throw e
-  } finally {
-    presenterAbort.abort()
-    await presentation
-  }
+  const token = await presentAndPoll(presenter, loginUrl, doneUrl, { timeoutMs: pollTimeoutMs, fetchImpl })
 
   const npmrc = writeAuthToken(registry, token, { npmArgs })
   onStatus({ phase: 'login-complete', npmrc })
@@ -337,6 +317,41 @@ export async function mintWebAuthSession (
   return { authUrl: body.authUrl, doneUrl: body.doneUrl }
 }
 
+/**
+ * Race a presenter against doneUrl polling - the shared shape of the login
+ * and publish ceremonies. Only a FATAL presenter failure aborts the poll: a
+ * non-fatal one (e.g. the browser fallback failing to open) still leaves the
+ * human able to complete the ceremony by visiting authUrl themselves. The
+ * presenter is aborted (torn down) as soon as polling settles either way.
+ */
+async function presentAndPoll (
+  presenter: Presenter,
+  authUrl: string,
+  doneUrl: string,
+  { authToken, timeoutMs, fetchImpl }:
+  { authToken?: string | null, timeoutMs: number, fetchImpl?: FetchLike },
+): Promise<string> {
+  const presenterAbort = new AbortController()
+  const pollAbort = new AbortController()
+  let presenterError: Error | null = null
+  const presentation = Promise.resolve()
+    .then(() => presenter({ authUrl, signal: presenterAbort.signal }))
+    .catch((e: Error) => { presenterError = e; if ((e as PublishError).fatal) pollAbort.abort() })
+
+  try {
+    return await pollDoneUrl(doneUrl, {
+      authToken, timeoutMs, signal: pollAbort.signal, ...(fetchImpl ? { fetchImpl } : {}),
+    })
+  } catch (e) {
+    if ((presenterError as PublishError | null)?.fatal) throw presenterError
+    if (presenterError && e instanceof Error) e.message += ` (presenter also failed: ${(presenterError as Error).message})`
+    throw e
+  } finally {
+    presenterAbort.abort()
+    await presentation
+  }
+}
+
 export async function pollDoneUrl (
   doneUrl: string,
   { authToken, timeoutMs = 300_000, signal, fetchImpl = fetch }:
@@ -345,12 +360,23 @@ export async function pollDoneUrl (
   const deadline = Date.now() + timeoutMs
   const headers: Record<string, string> = { accept: 'application/json', 'npm-auth-type': 'web' }
   if (authToken) headers.authorization = `Bearer ${authToken}`
+  let consecutiveFailures = 0
   while (true) {
     signal?.throwIfAborted()
     if (Date.now() > deadline) {
       throw new PublishError(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for WebAuthn approval`, { code: 'ETIMEDOUT' })
     }
-    const res = await fetchImpl(doneUrl, { headers, signal })
+    let res: Response
+    try {
+      res = await fetchImpl(doneUrl, { headers, signal })
+      consecutiveFailures = 0
+    } catch (e) {
+      // A transient network hiccup must not kill a ceremony that waits
+      // minutes for a human - tolerate a few consecutive fetch failures.
+      if (signal?.aborted || ++consecutiveFailures >= 3) throw e
+      await delay(2000, null, { signal })
+      continue
+    }
     if (res.status === 200) {
       const body = await res.json() as { token?: string }
       if (!body.token) throw new PublishError('Registry returned 200 from doneUrl without a token', { code: 'EWEBLOGIN' })
@@ -453,25 +479,7 @@ export async function publishWithWebAuth ({
   }
 
   onStatus({ phase: 'awaiting-human', authUrl, purpose: 'publish' })
-
-  const presenterAbort = new AbortController()
-  const pollAbort = new AbortController()
-  let presenterError: Error | null = null
-  const presentation = Promise.resolve()
-    .then(() => presenter({ authUrl: authUrl!, signal: presenterAbort.signal }))
-    .catch((e: Error) => { presenterError = e; if ((e as PublishError).fatal) pollAbort.abort() })
-
-  let otp: string
-  try {
-    otp = await pollDoneUrl(doneUrl, { authToken, timeoutMs: pollTimeoutMs, signal: pollAbort.signal })
-  } catch (e) {
-    if ((presenterError as PublishError | null)?.fatal) throw presenterError
-    if (presenterError && e instanceof Error) e.message += ` (presenter also failed: ${(presenterError as Error).message})`
-    throw e
-  } finally {
-    presenterAbort.abort()
-    await presentation
-  }
+  const otp = await presentAndPoll(presenter, authUrl, doneUrl, { authToken, timeoutMs: pollTimeoutMs })
 
   onStatus({ phase: 'publish-retry' })
   const second = await runNpm(['publish', '--json', ...npmArgs, `--otp=${otp}`], { cwd, npmBin, env })

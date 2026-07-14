@@ -205,6 +205,13 @@ let pollTimeoutMs = 300_000
 let presenterChoice: PresenterName | undefined
 let expectUser: string | undefined
 const npmArgs: string[] = []
+// A NaN/zero timeout would make doneUrl polling wait forever (Date.now() >
+// NaN is always false) - reject bad values instead of hanging silently.
+const parsePollTimeout = (value: string | undefined): number => {
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds) || seconds <= 0) fail(`--poll-timeout requires a positive number of seconds (got ${value ?? 'nothing'})`)
+  return seconds * 1000
+}
 for (let i = 0; i < flags.length; i++) {
   const a = flags[i]!
   // Intercept help before the `--` separator: forwarding it would make npm
@@ -213,8 +220,8 @@ for (let i = 0; i < flags.length; i++) {
     console.error(USAGE)
     process.exit(0)
   }
-  if (a === '--poll-timeout') pollTimeoutMs = Number(flags[++i]) * 1000
-  else if (a.startsWith('--poll-timeout=')) pollTimeoutMs = Number(a.split('=')[1]) * 1000
+  if (a === '--poll-timeout') pollTimeoutMs = parsePollTimeout(flags[++i])
+  else if (a.startsWith('--poll-timeout=')) pollTimeoutMs = parsePollTimeout(a.split('=')[1])
   else if (a === '--presenter') presenterChoice = flags[++i] as PresenterName
   else if (a.startsWith('--presenter=')) presenterChoice = a.split('=')[1] as PresenterName
   else if (a === '--user') expectUser = flags[++i]
@@ -228,7 +235,7 @@ const presenterName = presenterChoice ?? defaultPresenterName()
 const onStatus = ({ phase, authUrl, purpose, npmrc, code }: StatusEvent) => {
   if (phase === 'publish-attempt') console.error('· running npm publish ...')
   if (phase === 'login-required') console.error(`· npm session expired or missing (${code}) - starting web login`)
-  if (phase === 'minting-session') console.error('· npm redacted the auth URLs (npm < 12) - minting a fresh web-auth session')
+  if (phase === 'minting-session') console.error('· npm redacted or omitted the auth URLs (npm < 11.15) - minting a fresh web-auth session')
   if (phase === 'awaiting-human') {
     const what = purpose === 'login' ? 'login verification' : 'publish verification'
     console.error(`· npm requires human ${what} - presenting via ${presenterName}`)

@@ -172,6 +172,9 @@ export class WebShell {
   private constructor (child: ChildProcess, log: (m: string) => void) {
     this.#child = child
     this.#log = log
+    // A write after the shell died (e.g. close() racing its exit) raises
+    // EPIPE on stdin - swallow it, the exit handler already settles state.
+    child.stdin?.on('error', () => {})
     this.exited = new Promise((resolveExit) => {
       child.once('exit', (code) => resolveExit(code))
       child.once('error', () => resolveExit(null))

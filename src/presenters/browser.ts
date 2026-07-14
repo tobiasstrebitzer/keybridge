@@ -1,6 +1,6 @@
 // Fallback presenter: open the system default browser. Works everywhere; the
 // tab stays open after auth (npm's page shows its own success state). The
-// primary presenter is the invisible off-screen Chrome in ./chrome.ts.
+// primary presenter is the windowless WKWebView shell in ./webkit.ts.
 
 import { spawn } from 'node:child_process'
 import type { Presenter } from '../engine.ts'

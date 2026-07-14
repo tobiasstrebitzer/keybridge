@@ -1,4 +1,4 @@
-// Bits shared by the invisible-browser presenters (chrome.ts, webkit.ts).
+// In-page scripts used by the webkit presenter (webkit.ts).
 
 // In-page script polled by the presenter. Finds npm's "Use security key"
 // button and clicks it (which fires navigator.credentials.get() → keybridge).
@@ -45,8 +45,3 @@ export const prefillScript = (username: string): string => `(() => {
     return 'prefilled'
   } catch (e) { return 'pending' }
 })()`
-
-export function waitForAbort (signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve()
-  return new Promise((r) => signal.addEventListener('abort', () => r(), { once: true }))
-}

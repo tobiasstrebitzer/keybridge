@@ -276,7 +276,7 @@ the shell) + `browser.ts` (fallback), `src/webauthn.ts` + `src/signer.ts` +
 `src/cbor.ts` (the authenticator), `src/setup.ts`, `src/cli.ts`,
 `src/server.ts` (MCP), `src/actions/` (silkweave tool definitions); `native/`
 holds the two Swift helpers (`WebShell.swift` - windowless WKWebView shell,
-`SecureEnclaveSigner.swift` - built as `KeyBridge Agent`, which titles the
+`SecureEnclaveSigner.swift` - built as `KeyBridge`, which titles the
 Touch ID dialog) and `inject.js` (the page-world `navigator.credentials`
 override).
 

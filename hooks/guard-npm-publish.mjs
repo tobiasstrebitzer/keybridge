@@ -16,12 +16,22 @@ try {
 
 const command = input.tool_input?.command ?? ''
 
-// Match `npm publish` / `pnpm publish` / `yarn publish` / `npm stage publish`
-// anywhere in the command line (including after && ; |), tolerating
-// intervening flags, but not words like "publisher" or file paths.
-const PUBLISH_RE = /(?:^|[\s;&|(])(?:npm|pnpm|yarn)\s+(?:[\w:-]+\s+)*publish(?:\s|$|;|&|\|)/
+// Blank out quoted payloads of message-ish flags (-m/-am/--message, quoted
+// inline or =-joined) before matching: a commit message that merely TALKS
+// about "npm ... publish" must not trip the guard (bit ourselves during a
+// release: `git commit -m "docs: correct npm version claims and scope the
+// 2FA publish requirement"` was denied). Quoted strings elsewhere still
+// match, so `bash -c "npm publish"` stays caught.
+const MESSAGE_PAYLOAD_RE = /(\s(?:-[a-zA-Z]*m|--message)(?:=|\s+)?)(["'])(?:\\.|(?!\2).)*\2/g
+const scrubbed = command.replace(MESSAGE_PAYLOAD_RE, '$1$2$2')
 
-if (PUBLISH_RE.test(command)) {
+// Match `npm publish` / `pnpm publish` / `yarn publish` / `npm stage publish`
+// anywhere in the command line (including after && ; | and inside quotes,
+// e.g. `bash -c "npm publish"`), tolerating intervening flags, but not words
+// like "publisher" or file paths.
+const PUBLISH_RE = /(?:^|[\s;&|("'])(?:npm|pnpm|yarn)\s+(?:[\w:-]+\s+)*publish(?:\s|$|;|&|\||["'])/
+
+if (PUBLISH_RE.test(scrubbed)) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',

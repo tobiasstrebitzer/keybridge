@@ -7,13 +7,13 @@
 // use, so no keychain-access-groups entitlement / provisioning profile is
 // needed (a plain, even ad-hoc-signed, CLI works).
 //
-//   keybridge-se-signer create --tag <tag>
+//   KeyBridge create --tag <tag>
 //       -> generates an SE key, writes its blob under ~/.keybridge/se-keys/,
 //          prints {"x": base64, "y": base64} of the public point
-//   keybridge-se-signer sign --tag <tag> --message <base64> --reason <text>
+//   KeyBridge sign --tag <tag> --message <base64> --reason <text>
 //       -> prompts for Touch ID, signs the message with ECDSA-P256/SHA-256,
 //          prints {"signature": base64}  (DER - what WebAuthn expects)
-//   keybridge-se-signer probe
+//   KeyBridge probe
 //       -> creates + discards a throwaway SE key; {"ok": true} if usable
 //          (no Touch ID: key creation does not prompt)
 //
@@ -73,7 +73,7 @@ func point(_ pub: P256.Signing.PublicKey) -> (x: Data, y: Data) {
     return (x, y)
 }
 
-guard CommandLine.arguments.count >= 2 else { die("usage: keybridge-se-signer <create|sign|probe>") }
+guard CommandLine.arguments.count >= 2 else { die("usage: KeyBridge <create|sign|probe>") }
 let command = CommandLine.arguments[1]
 
 switch command {
