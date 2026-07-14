@@ -12,30 +12,61 @@
 // _attachments) get "***" URLs — as the npm CLI would report them — while
 // metadata-only session-mint PUTs get real, live URLs.
 import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 
 export const OTP_TOKEN = 'test-otp-42'
 export const SESSION_TOKEN = 'fresh-session-token'
 
-// `expiredToken`: PUTs presenting this bearer get a plain 401 (invalid/expired
-// session), like the registry after the 12h npm login session lapses. The
-// web-login flow (POST /-/v1/login) then issues SESSION_TOKEN.
-export function startMockRegistry ({ completeAuthOnVisit = true, redactPublishUrls = false, expiredToken = null } = {}) {
-  const state = {
+export interface MockPut {
+  otp: string | null
+  authorization: string | null
+  authType: string | null
+  minimal: boolean
+}
+
+export interface MockRegistryState {
+  authVisited: boolean
+  authComplete: boolean
+  donePolls: number
+  doneAuthHeaders: Set<string>
+  puts: MockPut[]
+  loginStarts: number
+  loginPageVisited: boolean
+}
+
+export interface MockRegistry {
+  url: string
+  state: MockRegistryState
+  close: () => Promise<unknown>
+}
+
+export interface MockRegistryOptions {
+  completeAuthOnVisit?: boolean
+  redactPublishUrls?: boolean
+  /** PUTs presenting this bearer get a plain 401 (expired session) */
+  expiredToken?: string | null
+}
+
+export function startMockRegistry (
+  { completeAuthOnVisit = true, redactPublishUrls = false, expiredToken = null }: MockRegistryOptions = {},
+): Promise<MockRegistry> {
+  const state: MockRegistryState = {
     authVisited: false,
     authComplete: false,
     donePolls: 0,
     doneAuthHeaders: new Set(),
-    puts: [], // { otp, authorization, minimal, authType }
+    puts: [],
     loginStarts: 0,
     loginPageVisited: false,
   }
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url, 'http://x')
-    const send = (status, body, headers = {}) => {
+    const url = new URL(req.url!, 'http://x')
+    const send = (status: number, body: unknown, headers: Record<string, string> = {}) => {
       res.writeHead(status, { 'content-type': 'application/json', ...headers })
       res.end(JSON.stringify(body))
     }
+    const port = () => (server.address() as AddressInfo).port
 
     if (req.method === 'GET' && url.pathname === '/auth') {
       state.authVisited = true
@@ -55,7 +86,7 @@ export function startMockRegistry ({ completeAuthOnVisit = true, redactPublishUr
     if (req.method === 'POST' && url.pathname === '/-/v1/login') {
       state.loginStarts++
       if (req.headers['npm-auth-type'] !== 'web') return send(401, { error: 'You must be logged in to publish packages.' })
-      const base = `http://127.0.0.1:${server.address().port}`
+      const base = `http://127.0.0.1:${port()}`
       return send(200, { loginUrl: `${base}/login-page`, doneUrl: `${base}/login-done` })
     }
 
@@ -72,15 +103,15 @@ export function startMockRegistry ({ completeAuthOnVisit = true, redactPublishUr
     }
 
     if (req.method === 'PUT') {
-      const bufs = []
-      req.on('data', (d) => bufs.push(d))
+      const bufs: Buffer[] = []
+      req.on('data', (d: Buffer) => bufs.push(d))
       req.on('end', () => {
-        let body = {}
+        let body: { _attachments?: unknown } = {}
         try { body = JSON.parse(Buffer.concat(bufs).toString('utf8')) } catch {}
-        const put = {
-          otp: req.headers['npm-otp'] ?? null,
+        const put: MockPut = {
+          otp: (req.headers['npm-otp'] as string | undefined) ?? null,
           authorization: req.headers.authorization ?? null,
-          authType: req.headers['npm-auth-type'] ?? null,
+          authType: (req.headers['npm-auth-type'] as string | undefined) ?? null,
           minimal: !body._attachments,
         }
         state.puts.push(put)
@@ -91,7 +122,7 @@ export function startMockRegistry ({ completeAuthOnVisit = true, redactPublishUr
         if (put.otp === OTP_TOKEN) {
           return send(201, { ok: true, id: decodeURIComponent(url.pathname.slice(1)) })
         }
-        const base = `http://127.0.0.1:${server.address().port}`
+        const base = `http://127.0.0.1:${port()}`
         const redact = redactPublishUrls && !put.minimal
         send(401, {
           error: 'You must provide a one-time pass. Upgrade your client or visit the auth URL.',
@@ -108,7 +139,7 @@ export function startMockRegistry ({ completeAuthOnVisit = true, redactPublishUr
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       resolve({
-        url: `http://127.0.0.1:${server.address().port}`,
+        url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
         state,
         close: () => new Promise((r) => server.close(r)),
       })

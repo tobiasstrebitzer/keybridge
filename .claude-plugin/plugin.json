@@ -1,5 +1,5 @@
 {
   "name": "keybridge",
   "description": "Safe WebAuthn bridge for npm publishing: Claude initiates the publish, you approve with your security key or Touch ID. Raw `npm publish` in Bash is blocked in favor of the gated bridge tool.",
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

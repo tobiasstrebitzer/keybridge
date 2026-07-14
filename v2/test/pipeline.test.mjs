@@ -127,10 +127,10 @@ test('a tampered challenge breaks verification (sanity: we are really signing)',
   assert.equal(ok, false)
 })
 
-test('assertion for an unknown rpId is refused', async () => {
+test('assertion for an unknown rpId is refused with the ENOCRED fallback signal', async () => {
   const signer = createSigner({ backend: 'software' })
   await assert.rejects(
     handleGet({ challenge: b64url(randomBytes(32)), rpId: 'evil.example', allowCredentials: [] }, 'https://evil.example', signer),
-    /no keybridge credential/
+    (e) => /no keybridge credential/.test(e.message) && e.code === 'ENOCRED'
   )
 })

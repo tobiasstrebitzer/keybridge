@@ -68,7 +68,10 @@ function makeNativeClasses () {
 // Build a fake page `window` with a working postMessage event bus, load inject.js
 // into it, and wire a daemon that answers via the REAL host signing code — the
 // full page -> content -> host round trip, minus Chrome.
-function loadInjectedPage (origin, signer) {
+// `realCreate`/`realGet` stub the page's native navigator.credentials (the
+// fallback target); `daemon` overrides the host round trip with a scripted
+// response for fault-injection tests.
+function loadInjectedPage (origin, signer, { realCreate, realGet, daemon } = {}) {
   const natives = makeNativeClasses()
   const listeners = []
   const window = {
@@ -80,8 +83,8 @@ function loadInjectedPage (origin, signer) {
   }
   const navigator = {
     credentials: {
-      create: async () => { throw new Error('real create should not be called') },
-      get: async () => { throw new Error('real get should not be called') },
+      create: realCreate ?? (async () => { throw new Error('real create should not be called') }),
+      get: realGet ?? (async () => { throw new Error('real get should not be called') }),
     },
   }
 
@@ -96,6 +99,10 @@ function loadInjectedPage (origin, signer) {
     if (e.source !== window) return
     const d = e.data
     if (!d || d.source !== 'keybridge-inject') return
+    if (daemon) {
+      window.postMessage({ source: 'keybridge-content', id: d.id, resp: await daemon(d) })
+      return
+    }
     try {
       const options = unwrap(d.options)
       const credential = d.op === 'create'
@@ -103,7 +110,12 @@ function loadInjectedPage (origin, signer) {
         : await handleGet(options, d.origin, signer)
       window.postMessage({ source: 'keybridge-content', id: d.id, resp: { ok: true, credential } })
     } catch (err) {
-      window.postMessage({ source: 'keybridge-content', id: d.id, resp: { ok: false, error: String(err?.message ?? err) } })
+      // mirror keybridge-webauthn-host.js: `code` rides along with the error
+      window.postMessage({
+        source: 'keybridge-content',
+        id: d.id,
+        resp: { ok: false, error: String(err?.message ?? err), ...(err?.code ? { code: err.code } : {}) },
+      })
     }
   })
 
@@ -194,4 +206,62 @@ test('inject.js create/get: native prototypes, toJSON, and RP-verifiable crypto'
   const signedMessage = Buffer.concat([sigAuthData, clientDataHash])
   const ok = createVerify('SHA256').update(signedMessage).verify(publicKey, Buffer.from(getJson.response.signature, 'base64url'))
   assert.equal(ok, true, 'assertion from inject.js must verify against the registered public key')
+})
+
+test('get() falls back to the real authenticator when keybridge has no credential (ENOCRED)', async () => {
+  // Fresh store (fresh HOME) — no credential for npmjs.com exists.
+  const signer = createSigner({ backend: 'software' })
+  const sentinel = { native: 'assertion-from-real-authenticator' }
+  let realGetOptions = null
+  const { navigator } = loadInjectedPage('https://www.npmjs.com', signer, {
+    realGet: async (options) => { realGetOptions = options; return sentinel },
+  })
+
+  const options = {
+    publicKey: {
+      challenge: randomBytes(32),
+      rpId: 'npmjs.com',
+      allowCredentials: [{ type: 'public-key', id: randomBytes(16) }],
+    },
+  }
+  const result = await navigator.credentials.get(options)
+  assert.equal(result, sentinel, 'the real authenticator result must be returned as-is')
+  assert.equal(realGetOptions, options, 'the ORIGINAL options object (live ArrayBuffers) must be passed through')
+})
+
+test('create() falls back to the real authenticator on a daemon ENOCRED', async () => {
+  const sentinel = { native: 'attestation-from-real-authenticator' }
+  let realCreateOptions = null
+  const { navigator } = loadInjectedPage('https://www.npmjs.com', null, {
+    daemon: async () => ({ ok: false, error: 'no keybridge credential', code: 'ENOCRED' }),
+    realCreate: async (options) => { realCreateOptions = options; return sentinel },
+  })
+
+  const options = { publicKey: { challenge: randomBytes(32), rp: { id: 'npmjs.com' }, user: { id: randomBytes(8) } } }
+  const result = await navigator.credentials.create(options)
+  assert.equal(result, sentinel)
+  assert.equal(realCreateOptions, options)
+})
+
+test('non-ENOCRED daemon errors still reject with NotAllowedError (no fallback)', async () => {
+  let realGetCalled = false
+  const { navigator } = loadInjectedPage('https://www.npmjs.com', null, {
+    daemon: async () => ({ ok: false, error: 'signer exploded' }),
+    realGet: async () => { realGetCalled = true; return {} },
+  })
+
+  await assert.rejects(
+    navigator.credentials.get({ publicKey: { challenge: randomBytes(32), rpId: 'npmjs.com' } }),
+    (e) => e instanceof DOMException && e.name === 'NotAllowedError' && /signer exploded/.test(e.message)
+  )
+  assert.equal(realGetCalled, false, 'genuine failures must NOT fall back')
+})
+
+test('non-publicKey requests always pass straight through to the real API', async () => {
+  const sentinel = { native: 'password-credential' }
+  const { navigator } = loadInjectedPage('https://www.npmjs.com', null, {
+    daemon: async () => { throw new Error('daemon must not be consulted') },
+    realGet: async () => sentinel,
+  })
+  assert.equal(await navigator.credentials.get({ password: true }), sentinel)
 })

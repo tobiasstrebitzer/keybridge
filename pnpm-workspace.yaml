@@ -1,0 +1,4 @@
+minimumReleaseAgeExclude:
+  - '@silkweave/auth@4.0.0'
+  - '@silkweave/core@4.0.0'
+  - '@silkweave/mcp@4.0.0'

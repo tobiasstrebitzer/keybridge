@@ -1,29 +1,43 @@
 {
   "name": "keybridge",
-  "version": "0.1.0",
-  "description": "Safe WebAuthn bridge for npm publishing from agents: runs npm publish, hands the human-verification ceremony to you (browser tab or macOS auth sheet), then completes the publish.",
-  "type": "module",
+  "version": "0.2.0",
+  "description": "Safe WebAuthn bridge for npm publishing from agents: the agent initiates, the human approves via Touch ID in an invisible off-screen Chrome.",
+  "private": true,
   "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
   "engines": {
-    "node": ">=20",
-    "npm": ">=11.6.0"
+    "node": ">=22.18"
   },
   "bin": {
-    "keybridge": "bin/keybridge.js",
-    "keybridge-mcp": "bin/keybridge-mcp.js"
+    "keybridge": "dist/cli.mjs",
+    "keybridge-mcp": "dist/server.mjs"
   },
   "files": [
-    "bin",
-    "src",
-    "hooks",
-    "skills",
-    ".claude-plugin",
-    ".mcp.json"
+    "dist",
+    "v2/extension",
+    "v2/host",
+    "v2/helper",
+    "v2/install.mjs"
   ],
   "scripts": {
-    "test": "node --test 'test/*.test.mjs'"
+    "build": "tsdown",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "prepack": "tsdown"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0"
+    "@silkweave/core": "^4.0.0",
+    "@silkweave/mcp": "^4.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "oxlint": "^1.73.0",
+    "tsdown": "^0.22.6",
+    "typescript": "^7.0.2"
   }
 }

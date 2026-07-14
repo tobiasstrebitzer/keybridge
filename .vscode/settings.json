@@ -1,0 +1,17 @@
+{
+  "typescript.experimental.useTsgo": true,
+  "typescript.native-preview.tsdk": "./node_modules/typescript",
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+    "**/flutter/ephemeral": true,
+    "**/Flutter/ephemeral": true,
+    "**/.symlinks": true,
+    "**/.plugin_symlinks": true,
+    "**/node_modules": true,
+    ".chrome-dev-profile": true
+  }
+}

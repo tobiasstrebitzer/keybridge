@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": { "correctness": "error", "suspicious": "error" },
+  "rules": {
+    "no-unused-vars": ["error", { "args": "all", "argsIgnorePattern": "^_",
+      "caughtErrors": "all", "caughtErrorsIgnorePattern": "^_",
+      "destructuredArrayIgnorePattern": "^_", "varsIgnorePattern": "^_",
+      "ignoreRestSiblings": true }],
+    "typescript/no-shadow": "error", "typescript/prefer-for-of": "error",
+    "typescript/adjacent-overload-signatures": "error",
+    "typescript/unified-signatures": "error",
+    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "no-underscore-dangle": "off" },
+  "ignorePatterns": ["node_modules", "dist", "v2", "hooks", "keybridge-test", "_docs"]
+}

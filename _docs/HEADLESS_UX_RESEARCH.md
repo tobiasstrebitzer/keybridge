@@ -1,5 +1,13 @@
 # keybridge — headless / invisible UX research
 
+> **STATUS (2026-07-14): Tier A shipped.** The recommendation below — an invisible
+> headed Chrome driving the extension over CDP — is implemented in
+> `src/presenters/chrome.ts` (+ the CDP client `src/cdp.ts`) and verified live.
+> One refinement from the build: macOS clamps off-screen window coordinates to the
+> display, so the window is hidden by **minimizing** it, not by
+> `--window-position=-32000,-32000` alone (page JS + network keep running while
+> minimized). This doc is kept as the design rationale.
+
 Goal: make the publish flow feel like **"run it → Touch ID → done"**, nothing else
 visible. Two target use cases:
 
@@ -139,7 +147,7 @@ npm's escalate ceremony. **Tier A — an invisible headed Chrome — is the path
 1. **Ship Tier A.** Change keybridge's `presenter` from "open default browser" to "launch
    an off-screen headed Chrome with the `.chrome-dev-profile` (extension + Cloudflare +
    website cookies), CDP-navigate to `authUrl`, auto-complete the ceremony, close." Both
-   use cases become `keybridge publish` / MCP `npm_publish` → Touch ID → done. The
+   use cases become `keybridge publish` / MCP `NpmPublish` → Touch ID → done. The
    persistent profile passing Cloudflare naturally is exactly why the browser is required,
    not merely convenient.
 2. **Add `inject.js` fallback** (Bitwarden-style `fallbackRequested`) so keybridge can stay
@@ -151,7 +159,7 @@ npm's escalate ceremony. **Tier A — an invisible headed Chrome — is the path
    browser.
 
 ### For the MCP / agent use case specifically
-The agent should never see a browser DOM. Whether Tier A or B, the MCP `npm_publish` tool
+The agent should never see a browser DOM. Whether Tier A or B, the MCP `NpmPublish` tool
 does all the driving **inside keybridge** (CDP or HTTP) and returns only a small structured
 result (published id/version, or an error). The model's only involvement is calling the
 tool; the human's only involvement is the Touch ID tap. That satisfies "token-efficient,

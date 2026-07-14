@@ -1,20 +1,13 @@
-// Presenters get the human to the WebAuthn ceremony. Each is an async
-// function ({ authUrl, signal }) that resolves when the presentation ends;
-// the engine aborts `signal` once doneUrl reports completion, at which point
-// any UI the presenter spawned should be torn down.
+// Fallback presenter: open the system default browser. Works everywhere; the
+// tab stays open after auth (npm's page shows its own success state). The
+// primary presenter is the invisible off-screen Chrome in ./chrome.ts.
 
 import { spawn } from 'node:child_process'
+import type { Presenter } from '../engine.ts'
 
-// Open the system default browser. Works everywhere; the tab stays open after
-// auth (npm's page shows its own success state).
-//
-// NOTE (next step — Tier A): a headless/invisible flow will add an off-screen
-// Chrome presenter that drives the keybridge extension via CDP so only the
-// Touch ID prompt is visible. See _docs/HEADLESS_UX_RESEARCH.md. A pure
-// browserless HTTP client is not viable — Cloudflare fronts www.npmjs.com.
-export function browserPresenter () {
-  return ({ authUrl }) => new Promise((resolve, reject) => {
-    const [cmd, args] = process.platform === 'darwin'
+export function browserPresenter (): Presenter {
+  return ({ authUrl }) => new Promise<void>((resolve, reject) => {
+    const [cmd, args]: [string, string[]] = process.platform === 'darwin'
       ? ['open', [authUrl]]
       : process.platform === 'win32'
         ? ['cmd', ['/c', 'start', '', authUrl]]
@@ -30,7 +23,7 @@ export function browserPresenter () {
 }
 
 // Best-effort desktop notification so the user knows a touch is awaited.
-export function notifyHuman (message, { title = 'keybridge' } = {}) {
+export function notifyHuman (message: string, { title = 'keybridge' }: { title?: string } = {}): void {
   try {
     if (process.platform === 'darwin') {
       const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)} sound name "Glass"`

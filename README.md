@@ -10,8 +10,11 @@ around the ceremony, never the ceremony itself.
 > **Validated end-to-end (2026-07-14):** enroll + `npm login` + `npm publish`
 > all completed against npm's production registry using a purely-software
 > Secure Enclave authenticator (no physical key), Touch ID as the only human
-> step. See `_docs/NPM_WEBAUTHN_FLOW.md` (full flow + edge cases) and
-> `_docs/HEADLESS_UX_RESEARCH.md` (invisible-UX design).
+> step. The **Tier A** invisible-Chrome presenter is built and verified live
+> (launch → load extension → ceremony page → teardown); the only unproven leg
+> is the final Touch ID tap through Tier A. See `_docs/NPM_WEBAUTHN_FLOW.md`
+> (full flow + edge cases) and `_docs/HEADLESS_UX_RESEARCH.md` (invisible-UX
+> design) and `_docs/NEXT_SESSION.md` (the live-test runbook).
 
 ## Why
 
@@ -28,7 +31,7 @@ npm publish --json   (non-TTY, hits the 2FA wall)
 └─ stdout: {"error": {"code": "EOTP", "authUrl": "...", "doneUrl": "..."}}
 
 keybridge:
-  1. opens authUrl for the human   → browser tab
+  1. drives authUrl for the human  → invisible off-screen Chrome (Tier A)
   2. human touches key / Touch ID  → the non-bypassable gate
   3. polls doneUrl                 → 202+retry-after … then 200 {token}
   4. re-runs npm publish --otp=<token>
@@ -42,9 +45,10 @@ CLI-side contract (`authUrl`/`doneUrl`/`--otp`) is npm's own.
 ### CLI (human)
 
 ```sh
-npx keybridge publish                 # opens your default browser for the touch
+npx keybridge publish                # macOS: invisible Chrome → Touch ID → done
 npx keybridge publish -- --tag beta  # everything after -- goes to npm publish
 npx keybridge login                  # just the web-login ceremony (12h session token)
+npx keybridge publish --presenter browser   # force the default-browser fallback
 ```
 
 ### Sessions and expiry
@@ -74,9 +78,9 @@ tokens: they remove the human gate and lose direct-publish rights ~Jan 2027.
 }
 ```
 
-Claude gets one tool, `npm_publish`, with typed inputs only
-(`tag`, `access`, `dryRun`, `cwd`) — no free-form flag
-injection (`--registry`, `--otp` etc. are unreachable).
+Claude gets two tools, `NpmPublish` and `NpmLogin`, with typed inputs only
+(`tag`, `access`, `dryRun`, `cwd`) — no free-form flag injection
+(`--registry`, `--otp` etc. are unreachable).
 
 ### Claude Code — as a plugin
 
@@ -92,47 +96,79 @@ Install from a local checkout for now: `claude --plugin-dir /path/to/keybridge`.
 
 ## Security model
 
-Two independent gates, in order:
+Two independent gates:
 
-1. **Claude Code permission gate** — the `npm_publish` tool declares
-   `_meta["anthropic/requiresUserInteraction"]`, so Claude Code (≥ 2.1.199)
-   shows an approval card on **every** call; it cannot be auto-approved.
-   Per-project whitelisting of the tool (`mcp__keybridge__npm_publish` in
-   `.claude/settings.json` `permissions.allow`) controls only the *attempt*.
+1. **Claude Code permission gate** — `NpmPublish` is a normal MCP tool, so
+   per-project whitelisting (`mcp__keybridge__NpmPublish` in
+   `.claude/settings.json` `permissions.allow`) controls whether Claude may
+   *attempt* a publish. Tool inputs are typed (no flag injection) and `cwd`
+   may not escape the project root.
 2. **WebAuthn user presence** — npm's server demands a fresh assertion from
    your enrolled authenticator. No touch, no publish. This gate cannot be
-   whitelisted, delegated, or scripted away.
+   whitelisted, delegated, or scripted away — it is the real security
+   boundary. Even the invisible-Chrome presenter surfaces the Touch ID /
+   security-key dialog, by design.
 
-Plus: the Bash side-channel is closed by the hook, tool inputs are typed
-(no flag injection), and `cwd` may not escape the project root.
+Plus: the Bash side-channel is closed by the hook.
 
-## Presenter
+## Presenter (Tier A — invisible Chrome)
 
-The ceremony opens in your **default browser** (`open` / `xdg-open` / `start`).
-The tab stays open after auth (npm's page shows its own success state). If a
-ceremony is cancelled, keybridge waits out the poll timeout (default 5 min;
-Ctrl+C to abort sooner).
+On macOS, the ceremony runs in a **real but invisible** Chrome: keybridge
+launches Google Chrome minimized/off-screen with a persistent profile, loads
+the keybridge extension over CDP, navigates to `authUrl`, and auto-triggers the
+"Use security key" step. The extension answers `navigator.credentials.get()`
+from a local Secure Enclave key → **Touch ID is the only thing you see**. Chrome
+is kept warm across publishes so repeat publishes skip the ~1–2 s cold start.
 
-There is no Apple-sanctioned way for a third-party CLI to run the WebAuthn
-ceremony outside a real browser context — WKWebView's WebAuthn is gated behind
-a browsers-only entitlement, and `ASWebAuthenticationSession` just delegates to
-the default browser on macOS 14+ (an earlier `--sheet` presenter was removed as
-a dead end). The **invisible/headless** direction (an off-screen Chrome driving
-the keybridge extension via CDP, so only Touch ID is visible) is designed in
-`_docs/HEADLESS_UX_RESEARCH.md` — a pure browserless HTTP client is not viable
-because Cloudflare fronts www.npmjs.com.
+A browser is required (not merely convenient): `www.npmjs.com` is behind
+Cloudflare bot-management, so a pure-HTTP client is blocked (`cf-mitigated:
+challenge`) — a real browser passes naturally and its profile holds the
+`cf_clearance` + `wub` cookies. A minimized window (rather than off-screen
+coordinates, which macOS clamps to the display) is what makes it invisible;
+page JS + network keep running while minimized. See
+`_docs/HEADLESS_UX_RESEARCH.md`.
+
+**Fallback** (`--presenter browser`, or automatically on non-macOS): open the
+system default browser (`open` / `xdg-open` / `start`) on the ceremony URL.
+
+## Layout
+
+- `src/` — the TypeScript sources (run as native `.ts` under Node ≥ 22.18 in
+  dev; built to `dist/` with tsdown for the published package):
+  `engine.ts` (publish/login orchestration), `cdp.ts` (minimal CDP client),
+  `presenters/chrome.ts` (Tier A) + `presenters/browser.ts` (fallback),
+  `actions/*` (silkweave `NpmPublish`/`NpmLogin`), `server.ts` (MCP stdio),
+  `cli.ts`. The published npm package ships only `dist/` + the v2 runtime.
+- `v2/` — the general-purpose Claude↔WebAuthn bridge the presenter drives: MV3
+  extension (`v2/extension/`), native host (`v2/host/`), Secure Enclave signer
+  (`v2/helper/`). Installer: `node v2/install.mjs`.
+- `hooks/`, `skills/`, `.claude-plugin/`, `.mcp.json` — the Claude plugin.
 
 ## Development
 
+Requires **Node ≥ 22.18** (native TS type-stripping) and **pnpm 11**. The Tier A
+presenter needs real Google Chrome and the keybridge native host installed
+(`node v2/install.mjs`).
+
 ```sh
-npm install
-npm test        # e2e against an in-process mock of npm's EOTP/doneUrl protocol
+pnpm install
+pnpm check                       # tsc --noEmit + oxlint + tests
+pnpm build                       # tsdown: src/ → dist/ (ESM, what the package ships)
+node --test v2/test/*.test.mjs   # v2 extension/host tests (plain JS)
 ```
 
-The mock registry (`test/mock-registry.mjs`) reproduces npmjs.com's exact
+The mock registry (`tests/mock-registry.ts`) reproduces npmjs.com's exact
 behavior as implemented by npm-registry-fetch/npm-profile: `401` +
 `www-authenticate: OTP` + `{authUrl, doneUrl}`, `202`/`retry-after` polling,
 `200 {token}`, and the `npm-otp` header on retry.
+
+### Environment
+
+- `KEYBRIDGE_PRESENTER=chrome|browser` — force a presenter.
+- `KEYBRIDGE_CHROME` — path to the Chrome binary.
+- `KEYBRIDGE_CHROME_PROFILE` — persistent profile dir (default
+  `~/.keybridge/chrome-profile`).
+- `KEYBRIDGE_EXTENSION` — unpacked extension dir (default `v2/extension`).
 
 ## npm < 12 caveat (important)
 
@@ -150,12 +186,16 @@ real publish retry.
 - **Live loop**: ✅ verified end-to-end against the real registry incl. a real
   `npm publish` (minted-session OTP accepted on retry). See
   `_docs/NPM_WEBAUTHN_FLOW.md`.
-- **Tier A (invisible UX)**: wire the presenter to an off-screen headed Chrome +
-  the keybridge extension so publish is "run → Touch ID → done". Design in
-  `_docs/HEADLESS_UX_RESEARCH.md`; next-session plan in `_docs/NEXT_SESSION.md`.
-- **`inject.js` fallback**: the v2 extension currently intercepts *all* WebAuthn
-  on its matched hosts; add Bitwarden-style `fallbackRequested` so it coexists
-  with other authenticators.
+- **Tier A (invisible UX)**: ✅ built + verified live except the final Touch ID
+  tap through Tier A. `_docs/NEXT_SESSION.md` is the runbook to close that.
+- **`inject.js` fallback**: ✅ Bitwarden-style `ENOCRED` fallback — the extension
+  calls the real `navigator.credentials` when it has no keybridge credential for
+  the rpId, so it coexists with other authenticators.
+- **Packaging**: the package is `private: true` (spike) but publish-ready in
+  shape — `pnpm build` (tsdown) emits `dist/`, the `bin`s point at the compiled
+  `dist/*.mjs` (so consumers don't need the native-TS toolchain), and `files`
+  ships only `dist/` + the v2 runtime (`extension`/`host`/`helper`/`install.mjs`).
+  Flip `private` off when ready to publish.
 - **MCP timeout**: a slow human may exceed the client's tool timeout; the
   server emits `notifications/progress` to keep the call alive, but verify
   against your Claude Code version (`MCP_TOOL_TIMEOUT`).

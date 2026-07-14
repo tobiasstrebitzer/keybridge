@@ -79,8 +79,11 @@ async function main () {
     audit({ op: msg.op, origin, rpId: options.rp?.id ?? options.rpId ?? null, credId: credential.id, backend: signer.backend })
     writeMessage({ ok: true, credential })
   } catch (e) {
-    audit({ op: msg?.op, origin: msg?.origin, error: String(e?.message ?? e) })
-    writeMessage({ ok: false, error: String(e?.message ?? e) })
+    audit({ op: msg?.op, origin: msg?.origin, error: String(e?.message ?? e), code: e?.code })
+    // `code` rides along so the extension can distinguish "no keybridge
+    // credential for this rpId" (ENOCRED -> fall back to the real
+    // authenticator) from genuine failures.
+    writeMessage({ ok: false, error: String(e?.message ?? e), ...(e?.code ? { code: e.code } : {}) })
   }
   process.exit(0)
 }

@@ -47,7 +47,11 @@
     if (!p) return
     pending.delete(d.id)
     if (d.resp && d.resp.ok) p.resolve(d.resp.credential)
-    else p.reject(new Error((d.resp && d.resp.error) || 'keybridge daemon error'))
+    else {
+      const err = new Error((d.resp && d.resp.error) || 'keybridge daemon error')
+      err.code = d.resp && d.resp.code
+      p.reject(err)
+    }
   })
 
   const request = (op, options) => new Promise((resolve, reject) => {
@@ -154,18 +158,30 @@
   const realCreate = credentials.create.bind(credentials)
   const realGet = credentials.get.bind(credentials)
 
+  // Bitwarden-style fallback: when the daemon reports it has no keybridge
+  // credential for this rpId (ENOCRED), hand the ceremony to the REAL
+  // navigator.credentials so a different authenticator (hardware key, iCloud
+  // passkey, ...) still works. This lets keybridge stay installed in a profile
+  // the user also logs into normally. Anything else is a genuine failure and
+  // surfaces as NotAllowedError, like a declined/failed native ceremony.
   navigator.credentials.create = function (options) {
     if (!options || !options.publicKey) return realCreate(options)
     return request('create', serialize(options.publicKey))
       .then(toCreateCredential)
-      .catch((err) => { throw new DOMException(String(err.message || err), 'NotAllowedError') })
+      .catch((err) => {
+        if (err && err.code === 'ENOCRED') return realCreate(options)
+        throw new DOMException(String(err.message || err), 'NotAllowedError')
+      })
   }
 
   navigator.credentials.get = function (options) {
     if (!options || !options.publicKey) return realGet(options)
     return request('get', serialize(options.publicKey))
       .then(toGetCredential)
-      .catch((err) => { throw new DOMException(String(err.message || err), 'NotAllowedError') })
+      .catch((err) => {
+        if (err && err.code === 'ENOCRED') return realGet(options)
+        throw new DOMException(String(err.message || err), 'NotAllowedError')
+      })
   }
 
   console.debug('[keybridge] WebAuthn bridge active on', window.location.origin)

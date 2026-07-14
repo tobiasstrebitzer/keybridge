@@ -14,12 +14,13 @@ bridge — never run `npm publish` directly in Bash (a hook will deny it).
 1. If the user asked for a version bump, update the version first
    (`npm version <major|minor|patch|x.y.z> --no-git-tag-version`, or edit
    package.json), and confirm the changelog/state is what they want shipped.
-2. Optionally validate with the `npm_publish` tool using `dryRun: true`.
-3. Call the `npm_publish` MCP tool (server: `keybridge`). Pass `tag` /
+2. Optionally validate with the `NpmPublish` tool using `dryRun: true`.
+3. Call the `NpmPublish` MCP tool (server: `keybridge`). Pass `tag` /
    `access` only when the user asked for non-defaults.
-4. Tell the user what to expect: a browser tab (or macOS auth sheet) will
-   open and they must touch their security key / Touch ID. The tool blocks
-   until they approve (5 minute timeout).
+4. Tell the user what to expect: on macOS the ceremony runs in an invisible
+   off-screen Chrome, so the **only** visible step is the Touch ID / security
+   key prompt (on other platforms a browser tab opens instead). The tool
+   blocks until they approve (5 minute timeout).
 5. Report the result: package id and version on success; on failure, relay
    the npm error summary.
 

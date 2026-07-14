@@ -90,7 +90,13 @@ export function createSigner ({
       const candidates = store.credentials.filter((c) =>
         c.rpId === rpId && (allowIds.length === 0 || allowIds.includes(c.credId)))
       if (candidates.length === 0) {
-        throw new Error(`no keybridge credential for rpId "${rpId}"${allowIds.length ? ' matching allowCredentials' : ''}`)
+        // ENOCRED is the fallback signal: the extension hands the ceremony to
+        // the real authenticator instead of failing the page (Bitwarden-style
+        // fallbackRequested), so keybridge can stay installed in a profile the
+        // user also logs into with other passkeys.
+        const err = new Error(`no keybridge credential for rpId "${rpId}"${allowIds.length ? ' matching allowCredentials' : ''}`)
+        err.code = 'ENOCRED'
+        throw err
       }
       const record = candidates[candidates.length - 1] // most recently registered
       record.signCount = (record.signCount ?? 0) + 1

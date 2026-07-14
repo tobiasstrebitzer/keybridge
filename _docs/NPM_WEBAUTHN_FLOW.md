@@ -53,7 +53,7 @@ v2/host/signer.js  →  ~/.keybridge/keybridge-se-signer (Swift, CryptoKit Secur
                        create: silent · sign: Touch ID (LocalAuthentication)
 ```
 
-For the CLI side, `src/engine.js` handles the npm publish/login orchestration
+For the CLI side, `src/engine.ts` handles the npm publish/login orchestration
 (`mintWebAuthSession`, `pollDoneUrl`, `publishWithWebAuth`, `loginWithWebAuth`).
 
 The credential store is `~/.keybridge/credentials.json` (one record per rpId: credId,
@@ -107,7 +107,7 @@ npm error   https://registry.npmjs.org/-/v1/done?authId=***
 ```
 
 `/auth/cli/***` is a 404 — raw `npm publish` cannot complete non-interactively on
-npm 11.x. keybridge recovers by minting its own session (`src/engine.js`):
+npm 11.x. keybridge recovers by minting its own session (`src/engine.ts`):
 
 1. `mintWebAuthSession({ registry, pkgName, authToken })` — metadata-only `PUT` to the
    package route with `npm-auth-type: web` + `Authorization: Bearer <token>` → the
@@ -224,23 +224,26 @@ that matters.
 ### Loading the extension in an automated Chrome
 - **`--load-extension` is dead on Chrome 150** (stable) — silently ignored (anti-malware).
   The `--disable-features=DisableLoadExtensionCommandLineSwitch` escape hatch is also gone.
-- Load via the **CDP Extensions domain** instead (`Extensions.loadUnpacked`, exposed by
-  chrome-devtools-mcp's `install_extension` behind `--categoryExtensions`; needs a pipe
-  connection — let the MCP launch Chrome, not `--browserUrl`). Requires
-  `--enable-unsafe-extension-debugging` if you drive it over a raw ws port yourself.
+- Load via the **CDP Extensions domain** instead (`Extensions.loadUnpacked`). The Tier A
+  presenter (`src/presenters/chrome.ts`) now does this itself over a raw ws port, launching
+  Chrome with `--enable-unsafe-extension-debugging`. (Historically we did it via
+  chrome-devtools-mcp's `install_extension` behind `--categoryExtensions`, which needs a
+  pipe connection — that dev harness is no longer used.)
 - **`--headless=new` does not load unpacked extensions.** Must run headful (see headless
   research doc for the invisible-headed workaround).
-- Unpacked extension **ID = SHA-256 of the absolute path** → loading from
-  `v2/extension` always yields `hanmdmgojaeciaajdbjiaaafebcgkhkc`, which the native
-  manifest's `allowed_origins` authorizes. Don't move the folder.
+- Unpacked extension **ID = SHA-256 of the absolute path** → loading from a given
+  `v2/extension` path always yields the same id (which the native manifest's
+  `allowed_origins` authorizes). Don't move the folder. The presenter derives both the id
+  and the manifest from the same path (`extIdFromPath` in `src/presenters/chrome.ts`), so
+  they stay consistent; the concrete id therefore depends on the repo's absolute path.
 
 ### Extension coexistence
-- `inject.js` has **no fallback yet**: while installed it intercepts *all* WebAuthn on
-  its matched hosts (`www.npmjs.com`, `webauthn.io`) and throws if it has no matching
-  credential — so it breaks a login that uses a *different* authenticator. During the
-  live test we uninstalled keybridge for the initial password login, then reinstalled it
-  for enrollment. Hardening TODO: Bitwarden-style `fallbackRequested` → call the real
-  `navigator.credentials` when keybridge has no credential for the rpId.
+- **Resolved.** `inject.js` now has the Bitwarden-style fallback: the signer flags "no
+  keybridge credential for this rpId" with `code:'ENOCRED'`, the host forwards it, and
+  `inject.js` calls the *real* `navigator.credentials.{get,create}` instead of throwing —
+  so keybridge coexists with other authenticators and no longer needs uninstalling for a
+  password/other-key login. (Before this, it intercepted *all* WebAuthn on its matched
+  hosts and threw when it had no matching credential.)
 
 ### signCount
 - Each assertion bumps and persists `signCount`; npm/RP expects it non-decreasing. After
@@ -252,12 +255,18 @@ that matters.
   store. Fix: set `$HOME` before a dynamic `import()` of the host modules. Verified the
   real store is untouched by a test run.
 
-### MCP / test-browser config
-- `.mcp.json` chrome-devtools args: `--channel=stable` (real Google Chrome — required so
-  the fixed-path native-messaging manifest is found; Chrome for Testing would break it),
-  `--userDataDir=<project>/.chrome-dev-profile` (persistent, gitignored),
-  `--categoryExtensions`.
-- After editing `.mcp.json`, the MCP server must be reconnected.
+### Browser / profile config (Tier A presenter — `src/presenters/chrome.ts`)
+- Use **real Google Chrome** (`--channel=stable` equivalent — the presenter defaults to
+  `/Applications/Google Chrome.app/...`), required so the fixed-path native-messaging
+  manifest is found; Chrome for Testing would break it.
+- Persistent profile at `~/.keybridge/chrome-profile` (override `KEYBRIDGE_CHROME_PROFILE`)
+  holds `cf_clearance` + `wub` + the loaded extension across publishes; the presenter also
+  writes the native-messaging manifest into `<profile>/NativeMessagingHosts/` on launch.
+- Native-messaging manifests are read at Chrome **startup**; the presenter keeps one Chrome
+  warm via the profile `DevToolsActivePort`, so a manifest change needs the warm Chrome
+  torn down (`closeChromePresenter`, or just quit Chrome) to take effect.
+- (The former dev harness drove Chrome through chrome-devtools-mcp against a
+  `<project>/.chrome-dev-profile`; that is no longer used.)
 
 ---
 

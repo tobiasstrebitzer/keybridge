@@ -1,7 +1,7 @@
 // Core engine: wraps `npm publish --json`, catches npm's EOTP web-auth error
 // (authUrl/doneUrl contract, npm CLI >= 11.6 / #8952), hands the WebAuthn
-// ceremony to a presenter (browser tab, macOS sheet, ...), polls doneUrl for
-// the one-time token, and retries the publish with --otp=<token>.
+// ceremony to a presenter (off-screen Chrome, browser tab, ...), polls doneUrl
+// for the one-time token, and retries the publish with --otp=<token>.
 //
 // The doneUrl polling protocol mirrors npm-profile's webAuthCheckLogin:
 //   GET doneUrl -> 202 + retry-after header while pending
@@ -13,8 +13,57 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
+export interface NpmErrorJson {
+  code?: string
+  summary?: string
+  detail?: string
+  authUrl?: string
+  doneUrl?: string
+}
+
+export interface NpmJson {
+  error?: NpmErrorJson
+  id?: string
+  name?: string
+  [key: string]: unknown
+}
+
+export interface NpmRunResult {
+  code: number | null
+  stdout: string
+  stderr: string
+  json: NpmJson | null
+}
+
+/** Gets the human to the WebAuthn ceremony; aborted via `signal` once done. */
+export type Presenter = (opts: { authUrl: string, signal: AbortSignal }) => Promise<unknown> | unknown
+
+export interface StatusEvent {
+  phase: 'publish-attempt' | 'login-required' | 'minting-session' | 'awaiting-human' | 'login-complete' | 'publish-retry'
+  authUrl?: string
+  purpose?: 'login' | 'publish'
+  npmrc?: string
+  code?: string
+}
+
+export type OnStatus = (event: StatusEvent) => void
+
+export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
+
+export interface PublishErrorDetail {
+  code?: string
+  stdout?: string
+  stderr?: string
+  json?: NpmJson | null
+}
+
 export class PublishError extends Error {
-  constructor (message, { code = 'EPUBLISH', stdout, stderr, json } = {}) {
+  code: string
+  stdout: string | undefined
+  stderr: string | undefined
+  json: NpmJson | null | undefined
+
+  constructor (message: string, { code = 'EPUBLISH', stdout, stderr, json }: PublishErrorDetail = {}) {
     super(message)
     this.name = 'PublishError'
     this.code = code
@@ -24,7 +73,7 @@ export class PublishError extends Error {
   }
 }
 
-const parseJson = (text) => {
+const parseJson = (text: string): NpmJson | null => {
   const trimmed = text.trim()
   try { return JSON.parse(trimmed) } catch {}
   // npm occasionally prefixes JSON output with notices; fall back to the first brace
@@ -33,7 +82,13 @@ const parseJson = (text) => {
   try { return JSON.parse(trimmed.slice(i)) } catch { return null }
 }
 
-export function runNpm (args, { cwd, npmBin = 'npm', env } = {}) {
+export interface RunNpmOptions {
+  cwd?: string
+  npmBin?: string
+  env?: NodeJS.ProcessEnv
+}
+
+export function runNpm (args: string[], { cwd, npmBin = 'npm', env }: RunNpmOptions = {}): Promise<NpmRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(npmBin, args, {
       cwd,
@@ -42,8 +97,8 @@ export function runNpm (args, { cwd, npmBin = 'npm', env } = {}) {
     })
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (d) => { stdout += d })
-    child.stderr.on('data', (d) => { stderr += d })
+    child.stdout.on('data', (d: Buffer) => { stdout += d })
+    child.stderr.on('data', (d: Buffer) => { stderr += d })
     child.on('error', reject)
     child.on('close', (code) => resolve({ code, stdout, stderr, json: parseJson(stdout) }))
   })
@@ -54,7 +109,10 @@ export function runNpm (args, { cwd, npmBin = 'npm', env } = {}) {
 // resolve it the way npm does: env var, then project .npmrc, then the
 // user config (--userconfig from npmArgs, or ~/.npmrc). Returns null when
 // no token is configured — doneUrl polling then runs unauthenticated.
-export async function getAuthToken (registryLikeUrl, { cwd = process.cwd(), npmArgs = [] } = {}) {
+export async function getAuthToken (
+  registryLikeUrl: string,
+  { cwd = process.cwd(), npmArgs = [] }: { cwd?: string, npmArgs?: string[] } = {},
+): Promise<string | null> {
   const { host } = new URL(registryLikeUrl)
   const key = `//${host}/:_authToken`
 
@@ -63,8 +121,8 @@ export async function getAuthToken (registryLikeUrl, { cwd = process.cwd(), npmA
 
   let userconfig = join(homedir(), '.npmrc')
   for (let i = 0; i < npmArgs.length; i++) {
-    const a = npmArgs[i]
-    if (a === '--userconfig') userconfig = npmArgs[i + 1]
+    const a = npmArgs[i]!
+    if (a === '--userconfig') userconfig = npmArgs[i + 1]!
     else if (a.startsWith('--userconfig=')) userconfig = a.slice('--userconfig='.length)
   }
 
@@ -78,13 +136,17 @@ export async function getAuthToken (registryLikeUrl, { cwd = process.cwd(), npmA
 // Persist a fresh session token the way `npm login` does: into the user
 // npmrc (or the --userconfig file the caller passed). Preserves all other
 // lines; replaces an existing token line for the host or appends one.
-export function writeAuthToken (registryLikeUrl, token, { npmArgs = [] } = {}) {
+export function writeAuthToken (
+  registryLikeUrl: string,
+  token: string,
+  { npmArgs = [] }: { npmArgs?: string[] } = {},
+): string {
   const { host } = new URL(registryLikeUrl)
   const key = `//${host}/:_authToken`
   let file = join(homedir(), '.npmrc')
   for (let i = 0; i < npmArgs.length; i++) {
-    const a = npmArgs[i]
-    if (a === '--userconfig') file = npmArgs[i + 1]
+    const a = npmArgs[i]!
+    if (a === '--userconfig') file = npmArgs[i + 1]!
     else if (a.startsWith('--userconfig=')) file = a.slice('--userconfig='.length)
   }
   let text = ''
@@ -104,6 +166,17 @@ export function writeAuthToken (registryLikeUrl, token, { npmArgs = [] } = {}) {
   return file
 }
 
+export interface LoginOptions {
+  registry?: string
+  cwd?: string
+  npmBin?: string
+  npmArgs?: string[]
+  presenter?: Presenter
+  onStatus?: OnStatus
+  pollTimeoutMs?: number
+  fetchImpl?: FetchLike
+}
+
 // Web-based login (what `npm login` does since Dec 2025 — yields a session
 // token, currently ~12h): POST /-/v1/login with npm-auth-type: web, hand the
 // loginUrl to the human, poll doneUrl, persist the token.
@@ -116,7 +189,7 @@ export async function loginWithWebAuth ({
   onStatus = () => {},
   pollTimeoutMs = 300_000,
   fetchImpl = fetch,
-} = {}) {
+}: LoginOptions = {}): Promise<{ registry: string, npmrc: string }> {
   if (!presenter) throw new TypeError('loginWithWebAuth requires a presenter')
   registry ??= await resolveRegistry({ cwd, npmBin, npmArgs })
   const res = await fetchImpl(`${registry.replace(/\/+$/, '')}/-/v1/login`, {
@@ -130,23 +203,24 @@ export async function loginWithWebAuth ({
     },
     body: JSON.stringify({}),
   })
-  const body = await res.json().catch(() => ({}))
+  const body = await res.json().catch(() => ({})) as { loginUrl?: string, doneUrl?: string }
   if (res.status !== 200 || !body.loginUrl || !body.doneUrl) {
-    throw new PublishError(`could not start web login (registry answered ${res.status})`, { code: 'EWEBLOGIN', json: body })
+    throw new PublishError(`could not start web login (registry answered ${res.status})`, { code: 'EWEBLOGIN', json: body as NpmJson })
   }
+  const { loginUrl, doneUrl } = body
 
-  onStatus({ phase: 'awaiting-human', authUrl: body.loginUrl, purpose: 'login' })
+  onStatus({ phase: 'awaiting-human', authUrl: loginUrl, purpose: 'login' })
   const presenterAbort = new AbortController()
-  let presenterError = null
+  let presenterError: Error | null = null
   const presentation = Promise.resolve()
-    .then(() => presenter({ authUrl: body.loginUrl, signal: presenterAbort.signal }))
-    .catch((e) => { presenterError = e })
+    .then(() => presenter({ authUrl: loginUrl, signal: presenterAbort.signal }))
+    .catch((e: Error) => { presenterError = e })
 
-  let token
+  let token: string
   try {
-    token = await pollDoneUrl(body.doneUrl, { timeoutMs: pollTimeoutMs, fetchImpl })
+    token = await pollDoneUrl(doneUrl, { timeoutMs: pollTimeoutMs, fetchImpl })
   } catch (e) {
-    if (presenterError) e.message += ` (presenter also failed: ${presenterError.message})`
+    if (presenterError && e instanceof Error) e.message += ` (presenter also failed: ${(presenterError as Error).message})`
     throw e
   } finally {
     presenterAbort.abort()
@@ -158,8 +232,8 @@ export async function loginWithWebAuth ({
   return { registry, npmrc }
 }
 
-function readNpmrcKey (file, key) {
-  let text
+function readNpmrcKey (file: string, key: string): string | null {
+  let text: string
   try { text = readFileSync(file, 'utf8') } catch { return null }
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim()
@@ -169,7 +243,7 @@ function readNpmrcKey (file, key) {
     if (line.slice(0, eq).trim() !== key) continue
     const value = line.slice(eq + 1).trim().replace(/^"(.*)"$/, '$1')
     // npmrc supports ${VAR} environment expansion
-    return value.replace(/\$\{([^}]+)\}/g, (_, name) => process.env[name] ?? '')
+    return value.replace(/\$\{([^}]+)\}/g, (_, name: string) => process.env[name] ?? '')
   }
   return null
 }
@@ -181,15 +255,18 @@ function readNpmrcKey (file, key) {
 // tarball) to the package route with `npm-auth-type: web` makes the registry
 // create a fresh, live session and return unredacted URLs in the 401 body.
 // Completing that ceremony yields an OTP valid for the real publish retry.
-export const isRedacted = (url) => typeof url !== 'string' || url.includes('***')
+export const isRedacted = (url: unknown): boolean => typeof url !== 'string' || url.includes('***')
 
-export async function resolveRegistry ({ cwd = process.cwd(), npmBin = 'npm', npmArgs = [] } = {}) {
+export async function resolveRegistry (
+  { cwd = process.cwd(), npmBin = 'npm', npmArgs = [] }: { cwd?: string, npmBin?: string, npmArgs?: string[] } = {},
+): Promise<string> {
   for (let i = 0; i < npmArgs.length; i++) {
-    if (npmArgs[i] === '--registry') return npmArgs[i + 1]
-    if (npmArgs[i].startsWith('--registry=')) return npmArgs[i].slice('--registry='.length)
+    const a = npmArgs[i]!
+    if (a === '--registry') return npmArgs[i + 1]!
+    if (a.startsWith('--registry=')) return a.slice('--registry='.length)
   }
   try {
-    const pkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'))
+    const pkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')) as { publishConfig?: { registry?: string } }
     if (pkg.publishConfig?.registry) return pkg.publishConfig.registry
   } catch {}
   const cfgFlags = npmArgs.filter((a, i, arr) =>
@@ -201,9 +278,12 @@ export async function resolveRegistry ({ cwd = process.cwd(), npmBin = 'npm', np
   return value
 }
 
-export async function mintWebAuthSession ({ registry, pkgName, authToken, fetchImpl = fetch }) {
+export async function mintWebAuthSession (
+  { registry, pkgName, authToken, fetchImpl = fetch }:
+  { registry: string, pkgName: string, authToken?: string | null, fetchImpl?: FetchLike },
+): Promise<{ authUrl: string, doneUrl: string }> {
   const escaped = pkgName.replace('/', '%2F')
-  const headers = {
+  const headers: Record<string, string> = {
     'content-type': 'application/json',
     accept: '*/*',
     'user-agent': 'keybridge (npm publish web-auth bridge)',
@@ -216,11 +296,11 @@ export async function mintWebAuthSession ({ registry, pkgName, authToken, fetchI
     headers,
     body: JSON.stringify({ _id: pkgName, name: pkgName }),
   })
-  const body = await res.json().catch(() => ({}))
+  const body = await res.json().catch(() => ({})) as { authUrl?: string, doneUrl?: string }
   if (res.status !== 401 || !body.authUrl || !body.doneUrl) {
     throw new PublishError(
       `could not create a web-auth session (registry answered ${res.status})`,
-      { code: 'EWEBLOGIN', json: body }
+      { code: 'EWEBLOGIN', json: body as NpmJson }
     )
   }
   if (isRedacted(body.authUrl) || isRedacted(body.doneUrl)) {
@@ -229,9 +309,13 @@ export async function mintWebAuthSession ({ registry, pkgName, authToken, fetchI
   return { authUrl: body.authUrl, doneUrl: body.doneUrl }
 }
 
-export async function pollDoneUrl (doneUrl, { authToken, timeoutMs = 300_000, signal, fetchImpl = fetch } = {}) {
+export async function pollDoneUrl (
+  doneUrl: string,
+  { authToken, timeoutMs = 300_000, signal, fetchImpl = fetch }:
+  { authToken?: string | null, timeoutMs?: number, signal?: AbortSignal, fetchImpl?: FetchLike } = {},
+): Promise<string> {
   const deadline = Date.now() + timeoutMs
-  const headers = { accept: 'application/json', 'npm-auth-type': 'web' }
+  const headers: Record<string, string> = { accept: 'application/json', 'npm-auth-type': 'web' }
   if (authToken) headers.authorization = `Bearer ${authToken}`
   while (true) {
     signal?.throwIfAborted()
@@ -240,7 +324,7 @@ export async function pollDoneUrl (doneUrl, { authToken, timeoutMs = 300_000, si
     }
     const res = await fetchImpl(doneUrl, { headers, signal })
     if (res.status === 200) {
-      const body = await res.json()
+      const body = await res.json() as { token?: string }
       if (!body.token) throw new PublishError('Registry returned 200 from doneUrl without a token', { code: 'EWEBLOGIN' })
       return body.token
     }
@@ -253,18 +337,28 @@ export async function pollDoneUrl (doneUrl, { authToken, timeoutMs = 300_000, si
   }
 }
 
-/**
- * Publish with WebAuthn hand-off.
- *
- * @param {object} opts
- * @param {string[]} opts.npmArgs      extra args forwarded to `npm publish`
- * @param {string}   opts.cwd          package directory
- * @param {Function} opts.presenter    async ({ authUrl, signal }) => void — must get the
- *                                     human to the WebAuthn ceremony; aborted via signal
- *                                     once the ceremony completes or times out
- * @param {Function} opts.onStatus     ({ phase, ...detail }) => void progress callback
- * @param {number}   opts.pollTimeoutMs how long to wait for the human
- */
+export interface PublishOptions {
+  /** extra args forwarded to `npm publish` */
+  npmArgs?: string[]
+  /** package directory */
+  cwd?: string
+  npmBin?: string
+  /** gets the human to the WebAuthn ceremony; aborted via signal once done */
+  presenter?: Presenter
+  /** progress callback */
+  onStatus?: OnStatus
+  /** how long to wait for the human */
+  pollTimeoutMs?: number
+  autoLogin?: boolean
+}
+
+export interface PublishOutcome {
+  published: boolean
+  usedWebAuth: boolean
+  result: NpmJson | null
+}
+
+/** Publish with WebAuthn hand-off. */
 export async function publishWithWebAuth ({
   npmArgs = [],
   cwd = process.cwd(),
@@ -273,7 +367,7 @@ export async function publishWithWebAuth ({
   onStatus = () => {},
   pollTimeoutMs = 300_000,
   autoLogin = true,
-} = {}) {
+}: PublishOptions = {}): Promise<PublishOutcome> {
   if (!presenter) throw new TypeError('publishWithWebAuth requires a presenter')
 
   onStatus({ phase: 'publish-attempt' })
@@ -305,36 +399,36 @@ export async function publishWithWebAuth ({
   }
 
   let { authUrl, doneUrl } = err
-  let authToken
+  let authToken: string | null
   if (isRedacted(authUrl) || isRedacted(doneUrl)) {
     // npm < 12: --json output redacted the session ids; mint our own session
     onStatus({ phase: 'minting-session' })
     const registry = await resolveRegistry({ cwd, npmBin, npmArgs })
     authToken = await getAuthToken(registry, { cwd, npmArgs })
-    let pkgName
+    let pkgName: string
     try {
-      pkgName = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')).name
+      pkgName = (JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')) as { name: string }).name
     } catch (e) {
-      throw new PublishError(`could not read package name from ${cwd}: ${e.message}`, { code: 'ECONFIG' })
+      throw new PublishError(`could not read package name from ${cwd}: ${(e as Error).message}`, { code: 'ECONFIG' })
     }
     ;({ authUrl, doneUrl } = await mintWebAuthSession({ registry, pkgName, authToken }))
   } else {
     authToken = await getAuthToken(doneUrl, { cwd, npmArgs })
   }
 
-  onStatus({ phase: 'awaiting-human', authUrl })
+  onStatus({ phase: 'awaiting-human', authUrl, purpose: 'publish' })
 
   const presenterAbort = new AbortController()
-  let presenterError = null
+  let presenterError: Error | null = null
   const presentation = Promise.resolve()
-    .then(() => presenter({ authUrl, signal: presenterAbort.signal }))
-    .catch((e) => { presenterError = e })
+    .then(() => presenter({ authUrl: authUrl!, signal: presenterAbort.signal }))
+    .catch((e: Error) => { presenterError = e })
 
-  let otp
+  let otp: string
   try {
     otp = await pollDoneUrl(doneUrl, { authToken, timeoutMs: pollTimeoutMs })
   } catch (e) {
-    if (presenterError) e.message += ` (presenter also failed: ${presenterError.message})`
+    if (presenterError && e instanceof Error) e.message += ` (presenter also failed: ${(presenterError as Error).message})`
     throw e
   } finally {
     presenterAbort.abort()
