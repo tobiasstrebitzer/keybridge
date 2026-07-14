@@ -54,29 +54,31 @@ keybridge setup              # compiles the two tiny Swift helpers into ~/.keybr
 (From a source checkout, `node src/cli.ts` works in place of `keybridge` -
 Node ≥ 22.18 runs the TypeScript directly.)
 
-Then enroll and log in once:
+Then log in and enroll once:
 
-1. **Enroll the keybridge passkey on your npm account** - run
-   `keybridge login`: a window opens the first time so you can sign in to
-   npmjs.com; go to *Settings → Two-Factor Authentication → Add security key*
-   in that window, and approve with Touch ID. (keybridge registers its own
-   Secure Enclave passkey - your existing security keys keep working.)
-2. Every publish after that is invisible: `keybridge publish` → Touch ID → done.
+1. **`keybridge login`** - a window opens the first time so you can sign in
+   to npmjs.com. (Account already protected by a security key? See the
+   callout below.)
+2. **`keybridge enroll`** - opens your npm two-factor settings in the
+   keybridge window; click *Add security key*, name it (e.g. "keybridge"),
+   approve with **Touch ID**. This registers keybridge's own Secure Enclave
+   passkey - your existing keys keep working.
+3. Every publish after that is invisible: `keybridge publish` → Touch ID → done.
 
 > **Already have a security key / passkey on your npm account?** Right after
 > the password step, npm will ask you to verify with it - but inside the
 > keybridge window that key is unreachable (WebAuthn there is wired to
 > keybridge's own signer; hardware keys and iCloud passkeys don't work in it).
-> Use npm's fallback on that screen instead: **"Use a recovery code"**. Once
-> you're in, add the keybridge security key under *Settings → Two-Factor
-> Authentication* as in step 1. You do **not** need to remove your existing
-> key - npm supports multiple keys, keybridge answers publish ceremonies with
-> its own, and your other key keeps working in your normal browser.
+> Use npm's fallback on that screen instead: **"Use a recovery code"**, then
+> continue with `keybridge enroll`. You do **not** need to remove your
+> existing key - npm supports multiple keys, keybridge answers publish
+> ceremonies with its own, and your other key keeps working in your normal
+> browser.
 >
 > No recovery codes at hand? Then avoid the prompt entirely: in your normal
 > browser, temporarily remove the old security key (*Settings → Two-Factor
-> Authentication*), run `keybridge login` (password only now), enroll the
-> keybridge key, and re-add your old key afterwards.
+> Authentication*), run `keybridge login` (password only now) and
+> `keybridge enroll`, and re-add your old key afterwards.
 
 ## Usage
 

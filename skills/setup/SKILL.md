@@ -57,22 +57,29 @@ Code, prefixing with `!` works):
 ```
 
 - A **keybridge window opens** (first run only): the user logs in to
-  npmjs.com with their password.
+  npmjs.com with their password. On an account without 2FA the ceremony
+  completes right after the password and the window closes - that's normal.
 - **If npm asks them to verify with an existing security key or passkey**:
   that key cannot work inside the keybridge window - tell the user to click
   npm's **"Use a recovery code"** fallback on that screen instead. (No
   recovery codes? They can temporarily remove the old security key from their
   normal browser first, and re-add it after enrollment.)
-- **Enroll the keybridge passkey** while that window is open: the user goes
-  to *Settings → Two-Factor Authentication → Add security key*, names it
-  (e.g. "keybridge"), and approves with **Touch ID**. Their existing keys
-  keep working; npm supports multiple.
-- If this first login run times out or errors after enrollment, that's
-  fine - the website session and the passkey are what mattered. Run the
-  login once more (`NpmLogin` again): it should now complete **fully
-  invisibly** with just a Touch ID prompt.
 
-## 4. Verify
+## 4. Enroll the keybridge security key (one-time, interactive)
+
+Skip this if `~/.keybridge/credentials.json` already has an `npmjs.com`
+credential. Otherwise have the USER run this in their own terminal (it opens
+a window on npm's 2FA settings and waits for the enrollment):
+
+```sh
+<plugin-root>/scripts/keybridge.sh enroll
+```
+
+In the window: *Add security key* → name it (e.g. "keybridge") → **Touch
+ID**. The command exits with `✓ enrolled` once the credential lands.
+Existing keys keep working; npm supports multiple.
+
+## 5. Verify
 
 - Call the `NpmPublish` MCP tool with `dryRun: true` in a publishable
   project - validates packaging with no ceremony.

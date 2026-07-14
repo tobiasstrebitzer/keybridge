@@ -2,6 +2,7 @@
 // keybridge CLI - human-facing entry point.
 //
 //   keybridge setup                                       # build native helpers, pick backend
+//   keybridge enroll                                      # add the keybridge security key to the npm account
 //   keybridge publish [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm publish args...]
 //   keybridge login   [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm-ish args, e.g. --registry]
 //
@@ -10,21 +11,63 @@
 // the only visible step is Touch ID, then completes the publish. An expired
 // or missing npm login session is handled automatically (extra touch).
 // login: just the web-login ceremony; persists the session token to npmrc.
-import { loginWithWebAuth, publishWithWebAuth, PublishError, type StatusEvent } from './engine.ts'
+import { readFileSync } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
+import { loginWithWebAuth, publishWithWebAuth, runNpm, PublishError, type StatusEvent } from './engine.ts'
 import { notifyHuman } from './presenters/browser.ts'
 import { selectPresenter, type PresenterName } from './presenters/select.ts'
+import { openSurfacedShell } from './presenters/webkit.ts'
+import { paths } from './signer.ts'
 import { runSetup } from './setup.ts'
+
+const USAGE = 'usage: keybridge <setup|enroll|publish|login> [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm args...]'
 
 const [, , command, ...rest] = process.argv
 
 if (command === 'setup') {
   runSetup()
-  console.error('✓ setup complete - next: `keybridge login` (first run opens a window to log into npmjs.com once)')
+  console.error('✓ setup complete - next: `keybridge login` (first run opens a window to log into npmjs.com once), then `keybridge enroll`')
   process.exit(0)
 }
 
+const npmjsCredentials = (): number => {
+  try {
+    const store = JSON.parse(readFileSync(paths.STORE, 'utf8')) as { credentials: Array<{ rpId: string }> }
+    return store.credentials.filter((c) => c.rpId.includes('npmjs.com')).length
+  } catch { return 0 }
+}
+
+// enroll: open the shell SURFACED on npm's 2FA settings so the human can add
+// the keybridge security key (create() is answered by our signer → Touch ID).
+// Enrollment can't piggyback on `login`: on an account without 2FA the login
+// ceremony completes right after the password and tears the window down.
+if (command === 'enroll') {
+  const who = await runNpm(['whoami']).catch(() => null)
+  const username = who?.code === 0 ? who.stdout.trim() : ''
+  const url = username
+    ? `https://www.npmjs.com/settings/${username}/tfa`
+    : 'https://www.npmjs.com/settings' // npm redirects; the user navigates to 2FA settings
+  console.error(`· opening npm two-factor settings${username ? ` for ${username}` : ''} in the keybridge window`)
+  console.error('  → click "Add security key", name it (e.g. "keybridge"), approve with Touch ID')
+  const before = npmjsCredentials()
+  const shell = await openSurfacedShell(url)
+  const deadline = Date.now() + 10 * 60_000
+  let enrolled = false
+  while (Date.now() < deadline) {
+    await delay(1000)
+    if (npmjsCredentials() > before) { enrolled = true; break }
+  }
+  shell.close()
+  if (enrolled) {
+    console.error('✓ keybridge security key enrolled - publishes are now Touch ID-gated')
+    process.exit(0)
+  }
+  console.error('✗ timed out waiting for the security key to be added (10 min)')
+  process.exit(1)
+}
+
 if (command !== 'publish' && command !== 'login') {
-  console.error('usage: keybridge <setup|publish|login> [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm args...]')
+  console.error(USAGE)
   process.exit(command === undefined || command === '--help' || command === '-h' ? 0 : 64)
 }
 
@@ -36,7 +79,7 @@ for (let i = 0; i < rest.length; i++) {
   // Intercept help before the `--` separator: forwarding it would make npm
   // print its help and "succeed" without publishing anything.
   if (a === '--help' || a === '-h') {
-    console.error('usage: keybridge <setup|publish|login> [--poll-timeout <sec>] [--presenter webkit|browser] [--] [npm args...]')
+    console.error(USAGE)
     process.exit(0)
   }
   if (a === '--poll-timeout') pollTimeoutMs = Number(rest[++i]) * 1000

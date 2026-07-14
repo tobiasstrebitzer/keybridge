@@ -253,6 +253,21 @@ export class WebShell {
 }
 
 /**
+ * Open the ceremony shell SURFACED on a URL, outside any engine ceremony -
+ * used by `keybridge enroll` to let the human add the keybridge security key
+ * on npm's 2FA settings page (the injected override answers the create()
+ * ceremony with Touch ID). The caller owns the shell's lifetime.
+ */
+export async function openSurfacedShell (url: string, opts: WebkitPresenterOptions = {}): Promise<WebShell> {
+  const o = resolveWebkitOptions(opts)
+  await ensureShellBinary(o)
+  const shell = await WebShell.start(o)
+  shell.send({ cmd: 'navigate', url })
+  shell.send({ cmd: 'surface' })
+  return shell
+}
+
+/**
  * The Tier A2 presenter. Engine contract: called with ({ authUrl, signal });
  * must get the human to the ceremony; the engine aborts `signal` once doneUrl
  * reports completion (or on timeout), at which point the shell is torn down.
