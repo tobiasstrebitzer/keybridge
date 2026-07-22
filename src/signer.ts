@@ -77,15 +77,31 @@ export function createSigner ({
   backend = resolveBackend(),
   helperPath = defaultHelperPath(),
 }: { backend?: string, helperPath?: string } = {}): Signer {
+  // The helper prints {"error": "...", "code"?: "<LAError name>"} on stdout
+  // and exits 1 on failure (its stderr - the KEYBRIDGE_SE_DEBUG trace -
+  // passes through to ours). Surface that as a coded Error instead of the
+  // raw execFileSync throw, so e.g. a Touch ID presentation failure reads
+  // "user presence check failed: notInteractive", not "command failed".
+  const runHelper = (args: string[]): string => {
+    try {
+      return execFileSync(helperPath, args, { encoding: 'utf8' })
+    } catch (e) {
+      let parsed: { error?: string, code?: string } = {}
+      try { parsed = JSON.parse(String((e as { stdout?: string }).stdout ?? '').trim()) } catch {}
+      const err = new Error(parsed.error ?? `Secure Enclave helper failed: ${(e as Error).message}`) as Error & { code?: string }
+      if (parsed.code) err.code = parsed.code
+      throw err
+    }
+  }
   const seCreate = (keyTag: string): { x: Buffer, y: Buffer } => {
-    const out = execFileSync(helperPath, ['create', '--tag', keyTag], { encoding: 'utf8' })
+    const out = runHelper(['create', '--tag', keyTag])
     const { x, y } = JSON.parse(out) as { x: string, y: string }
     return { x: Buffer.from(x, 'base64'), y: Buffer.from(y, 'base64') }
   }
   const seSign = (keyTag: string, message: Buffer, reason: string): Buffer => {
-    const out = execFileSync(helperPath, [
+    const out = runHelper([
       'sign', '--tag', keyTag, '--message', Buffer.from(message).toString('base64'), '--reason', reason,
-    ], { encoding: 'utf8' })
+    ])
     return Buffer.from((JSON.parse(out) as { signature: string }).signature, 'base64')
   }
 

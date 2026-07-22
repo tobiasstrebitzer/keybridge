@@ -17,18 +17,44 @@
 //       -> creates + discards a throwaway SE key; {"ok": true} if usable
 //          (no Touch ID: key creation does not prompt)
 //
-// Output is always a single JSON object on stdout; errors -> {"error":"..."}.
+// Output is always a single JSON object on stdout; errors -> {"error":"..."}
+// (plus a "code" with the LAError name when user-presence evaluation failed).
+// KEYBRIDGE_SE_DEBUG=1 (or --verbose) traces every step to stderr.
+//
+// macOS only presents the Touch ID sheet when the requesting process is
+// frontmost; a background process gets a "KeyBridge wants to use Touch ID"
+// NOTIFICATION the human must click instead - which reads as "the dialog
+// never showed" (the exact repeated-publish flake). So `sign` runs as a
+// briefly-activated accessory NSApplication and activates itself before every
+// evaluation, and evaluates user presence EXPLICITLY (evaluatePolicy) so a
+// presentation failure surfaces as a precise LAError instead of a silent
+// 5-minute hang inside CryptoKit's signature call.
 
 import Foundation
 import CryptoKit
 import LocalAuthentication
+import AppKit
+
+let launchDate = Date()
+let debugEnabled = CommandLine.arguments.contains("--verbose")
+    || (ProcessInfo.processInfo.environment["KEYBRIDGE_SE_DEBUG"] ?? "").isEmpty == false
+
+func dlog(_ message: String) {
+    guard debugEnabled else { return }
+    let ms = Int(Date().timeIntervalSince(launchDate) * 1000)
+    FileHandle.standardError.write("[KeyBridge \(ProcessInfo.processInfo.processIdentifier) +\(ms)ms] \(message)\n".data(using: .utf8)!)
+}
 
 func emit(_ json: String) { print(json) }
 
-func die(_ message: String) -> Never {
-    let escaped = message.replacingOccurrences(of: "\\", with: "\\\\")
-                         .replacingOccurrences(of: "\"", with: "\\\"")
-    emit("{\"error\":\"\(escaped)\"}")
+func jsonEscape(_ s: String) -> String {
+    s.replacingOccurrences(of: "\\", with: "\\\\")
+     .replacingOccurrences(of: "\"", with: "\\\"")
+}
+
+func die(_ message: String, code: String? = nil) -> Never {
+    let codePart = code.map { ",\"code\":\"\(jsonEscape($0))\"" } ?? ""
+    emit("{\"error\":\"\(jsonEscape(message))\"\(codePart)}")
     exit(1)
 }
 
@@ -73,6 +99,71 @@ func point(_ pub: P256.Signing.PublicKey) -> (x: Data, y: Data) {
     return (x, y)
 }
 
+func laErrorName(_ error: Error?) -> String {
+    guard let la = error as? LAError else { return "unknown" }
+    switch la.code {
+    case .userCancel: return "userCancel"
+    case .systemCancel: return "systemCancel"
+    case .appCancel: return "appCancel"
+    case .authenticationFailed: return "authenticationFailed"
+    case .passcodeNotSet: return "passcodeNotSet"
+    case .biometryNotAvailable: return "biometryNotAvailable"
+    case .biometryNotEnrolled: return "biometryNotEnrolled"
+    case .biometryLockout: return "biometryLockout"
+    case .userFallback: return "userFallback"
+    case .invalidContext: return "invalidContext"
+    case .notInteractive: return "notInteractive"
+    default: return "laError(\(la.code.rawValue))"
+    }
+}
+
+// The interactive path: activate, prove user presence, sign, exit. Runs on the
+// main run loop (app.run()) because activation and LA presentation need one.
+func runSign(blob: Data, message: Data, reason: String, app: NSApplication) {
+    var attempt = 0
+
+    func evaluate() {
+        attempt += 1
+        let ctx = LAContext()
+        let frontmost = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+        dlog("attempt \(attempt): activating (frontmost was: \(frontmost))")
+        app.activate(ignoringOtherApps: true)
+
+        var canError: NSError?
+        let can = ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &canError)
+        dlog("canEvaluatePolicy=\(can) biometry=\(ctx.biometryType.rawValue) error=\(canError.map { String(describing: $0) } ?? "none")")
+
+        // .deviceOwnerAuthentication matches the key's .userPresence gate
+        // (biometry, watch, or password); a context that already evaluated it
+        // satisfies the gate, so the signature below never re-prompts.
+        ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, laError in
+            if ok {
+                dlog("user presence confirmed after \(Int(Date().timeIntervalSince(launchDate) * 1000))ms - signing")
+                do {
+                    let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: ctx)
+                    let signature = try key.signature(for: message) // ECDSA/SHA-256, no second prompt
+                    emit("{\"signature\":\"\(signature.derRepresentation.base64EncodedString())\"}")
+                    exit(0)
+                } catch {
+                    die("signing failed: \(error)")
+                }
+            }
+            let name = laErrorName(laError)
+            dlog("evaluatePolicy failed: \(name) (\(laError.map { String(describing: $0) } ?? "no error object"))")
+            // The two presentation flakes (the sheet could not be shown / the
+            // system dismissed it) get one re-activated retry before failing.
+            if attempt == 1 && (name == "systemCancel" || name == "notInteractive") {
+                dlog("retrying once after re-activation")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { evaluate() }
+                return
+            }
+            die("Touch ID / user presence check failed: \(name)", code: name)
+        }
+    }
+
+    DispatchQueue.main.async { evaluate() }
+}
+
 guard CommandLine.arguments.count >= 2 else { die("usage: KeyBridge <create|sign|probe>") }
 let command = CommandLine.arguments[1]
 
@@ -97,15 +188,10 @@ case "sign":
     let reason = arg("--reason") ?? "Authorize keybridge signature"
     guard let message = Data(base64Encoded: msgB64) else { die("invalid --message base64") }
     guard let blob = try? Data(contentsOf: blobURL(tag)) else { die("credential blob not found for tag") }
-    let ctx = LAContext()
-    ctx.localizedReason = reason
-    do {
-        let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: ctx)
-        let signature = try key.signature(for: message) // triggers Touch ID; ECDSA/SHA-256
-        emit("{\"signature\":\"\(signature.derRepresentation.base64EncodedString())\"}")
-    } catch {
-        die("signing failed: \(error)")
-    }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    runSign(blob: blob, message: message, reason: reason, app: app)
+    app.run() // exits via exit() in runSign
 
 case "probe":
     requireSecureEnclave()
