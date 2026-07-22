@@ -36,12 +36,14 @@
   ],
   "scripts": {
     "build": "tsdown",
-    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "check": "pnpm typecheck && pnpm lint && node scripts/sync-plugin-version.mjs --check && pnpm test",
     "typecheck": "tsc --noEmit",
     "keybridge": "node src/cli.ts",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
+    "sync:plugin": "node scripts/sync-plugin-version.mjs",
     "test": "node --test \"tests/**/*.test.ts\"",
+    "version": "node scripts/sync-plugin-version.mjs && git add .claude-plugin/plugin.json",
     "prepack": "tsdown"
   },
   "dependencies": {

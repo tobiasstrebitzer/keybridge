@@ -64,7 +64,10 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   plugin cache (a bare clone: `npm install --omit=dev` once, then native-TS
   `src/server.ts`; install output must go to stderr - stdout is the MCP
   channel). `scripts/keybridge.sh` is the same bootstrap for the CLI, used by
-  the setup skill.
+  the setup skill. `scripts/sync-plugin-version.mjs` pins
+  `.claude-plugin/plugin.json` to the package.json version (stale-cache gotcha
+  below): `--check` runs inside `pnpm check`, and the npm `version` lifecycle
+  hook syncs + stages it on every bump.
 - `tests/` - `node --test`, all TS. `mock-registry.ts` reproduces npmjs.com's
   CLI contract; `helpers/fake-shell.mjs` mimics the WKWebView shell's stdio
   protocol; `inject.test.ts` runs `native/inject.js` against throwing stub
@@ -149,6 +152,15 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   option → webauthn responder → `handleGet` → signer, so the Touch ID sheet
   reads e.g. “"KeyBridge" is trying to publish keybridge@0.5.1 to npm as
   tstrebitzer” - concurrent multi-project publishes can't be confused.
+- **Plugin version drives the consumer cache.** Claude Code installs a plugin
+  into `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/` and only
+  re-clones when `.claude-plugin/plugin.json`'s `version` changes. Shipping a
+  new npm version without bumping the plugin manifest leaves every consumer
+  repo on the old checkout - old skills, old bootstrap, and a
+  `keybridge@<old>` install inside the cached clone. That happened for real
+  (plugin sat at 0.3.3 while the package was at 0.6.0), hence the
+  version-parity gate. `marketplace.json` carries no version of its own; the
+  plugin manifest is the only lever.
 - The CryptoKit SecureEnclave API stores on-disk key blobs (no keychain
   entitlement needed) - ad-hoc-signed helper binaries work.
 - History: the earlier architecture (MV3 extension → native-messaging host →
@@ -168,7 +180,11 @@ node src/cli.ts setup   # (re)build both Swift helpers into ~/.keybridge
 - check: `pnpm check`
 - test: `pnpm test`
 - push: yes (origin https://github.com/tobiasstrebitzer/keybridge)
-- version_bump: yes (single package; infer patch/minor from changes)
+- version_bump: yes (single package; infer patch/minor from changes). ALWAYS
+  bump `.claude-plugin/plugin.json` to the same version in the same commit -
+  run `pnpm sync:plugin` (or let `npm version` do it) and verify with
+  `node scripts/sync-plugin-version.mjs --check`. Consumers stay on a stale
+  plugin cache otherwise.
 - publish: yes - dogfood it: use the keybridge `NpmPublish` MCP tool with
   `user: "tstrebitzer"` (never raw `npm publish`; the hook blocks it anyway).
   First published as `keybridge@0.4.0` on 2026-07-14. prepack rebuilds `dist/`
