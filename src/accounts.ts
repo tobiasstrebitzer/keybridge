@@ -281,7 +281,11 @@ export async function loginAs (username: string | undefined, opts: LoginAsOption
   const storeId = candidateStoreId(expected)
   const presenter = opts.presenter
     ?? selectPresenter(opts.presenterName, {
-      webkit: { storeId, ...(expected ? { prefillUsername: expected } : {}) },
+      webkit: {
+        storeId,
+        // prefill the form AND name the account in the Touch ID dialog
+        ...(expected ? { prefillUsername: expected, ceremonyContext: { user: expected } } : {}),
+      },
     }).presenter
 
   // NOTE: bindAfterLogin heals the freshest assertion marker (<=15 min) onto

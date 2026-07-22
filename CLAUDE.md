@@ -31,9 +31,14 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
 - `src/presenters/` - `webkit.ts` (the macOS default: drives the windowless
   WKWebView shell over JSON-lines stdio, answers WebAuthn ceremonies
   in-process), `browser.ts` (open-default-browser fallback), `select.ts`
-  (webkit → browser), `shared.ts` (`STATUS_SCRIPT` that auto-clicks npm's
-  "Use security key" button + the login-form prefill script). No desktop
-  notifications anywhere - deliberately removed; the sheet is the signal.
+  (webkit → browser), `shared.ts` (`STATUS_SCRIPT` that ticks npm's
+  "remember me for 5 minutes" checkbox when present - reported as a
+  `+remember` status suffix - then auto-clicks "Use security key"; also the
+  login-form prefill script and `CAPTURE_SCRIPT`). `KEYBRIDGE_CAPTURE_DOM=1`
+  makes the presenter (and `keybridge open`) write a JSON snapshot of every
+  distinct page state to `~/.keybridge/captures/<ts>/` - the way to learn
+  npm's auth-page DOM from a real ceremony. No desktop notifications
+  anywhere - deliberately removed; the sheet is the signal.
 - `src/webauthn.ts` + `src/signer.ts` + `src/cbor.ts` - the authenticator:
   assembles clientDataJSON/authenticatorData/attestation, stores credentials in
   `~/.keybridge/credentials.json`, signs via Secure Enclave helper (Touch ID)
@@ -117,6 +122,28 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   `PUT` with `npm-auth-type: web`.
 - The SE signer shells out synchronously - the event loop stalls during the
   human's Touch ID think-time; engine polling resumes after. Fine by design.
+- **macOS only shows the Touch ID sheet for the FRONTMOST process**; a
+  background one gets a "KeyBridge wants to use Touch ID" notification
+  instead (reads as "no dialog", the repeated-publish flake). The signer's
+  `sign` therefore runs as an accessory NSApplication that activates itself
+  before EXPLICITLY evaluating user presence (`LAContext.evaluatePolicy`,
+  precise LAError codes in `{"error","code"}`, one retry on systemCancel/
+  notInteractive). `KEYBRIDGE_SE_DEBUG=1` traces each step to stderr;
+  `scripts/debug-touchid.sh [n]` reproduces an n-prompt chain with a
+  throwaway key while tailing the LocalAuthentication system log.
+- npm's publish 2FA page offers a 5-minute "cooldown" (remember me), keyed on
+  IP + access token: once ticked (STATUS_SCRIPT does it automatically),
+  follow-up publishes inside the window don't even hit EOTP - the first
+  `npm publish` succeeds, so bulk chains need one touch per 5 minutes.
+  Confirmed E2E 2026-07-22 (3-version publish chain; v3 took 3.5s, no touch).
+  The checkbox on /escalate/webauthn has an EMPTY <label>; match on the
+  input's aria-label ("Do not challenge npm publish ... for the next 5
+  minutes") or name/id (`didOptForCooldown`), never on label text.
+- Ceremony context (pkg name@version + account) threads engine →
+  presenter (`purpose` on the Presenter call) → `ceremonyContext` webkit
+  option → webauthn responder → `handleGet` → signer, so the Touch ID sheet
+  reads e.g. “"KeyBridge" is trying to publish keybridge@0.5.1 to npm as
+  tstrebitzer” - concurrent multi-project publishes can't be confused.
 - The CryptoKit SecureEnclave API stores on-disk key blobs (no keychain
   entitlement needed) - ad-hoc-signed helper binaries work.
 - History: the earlier architecture (MV3 extension → native-messaging host →

@@ -112,8 +112,11 @@ export async function handleCreate (options: CreateOptions, origin: string, sign
   }
 }
 
-// navigator.credentials.get() - authentication
-export async function handleGet (options: GetOptions, origin: string, signer: Signer): Promise<WireCredential> {
+// navigator.credentials.get() - authentication. `reason` becomes the Touch ID
+// dialog's body line; callers with publish context pass e.g.
+// "publish keybridge@0.5.1 to npm as tstrebitzer" so concurrent ceremonies
+// can never be confused (the text lives in the system dialog being approved).
+export async function handleGet (options: GetOptions, origin: string, signer: Signer, reason?: string): Promise<WireCredential> {
   const rpId = rpIdFor(options.rpId, origin)
   const allowIds = (options.allowCredentials ?? []).map((c) => c.id) // base64url strings
 
@@ -124,7 +127,7 @@ export async function handleGet (options: GetOptions, origin: string, signer: Si
   const clientDataHash = createHash('sha256').update(cdj).digest()
   const message = Buffer.concat([authData, clientDataHash])
   // Touch ID dialog reads: “"KeyBridge" is trying to <reason>.”
-  const signature = await signer.sign(record, message, `authenticate to ${rpId}`)
+  const signature = await signer.sign(record, message, reason ?? `authenticate to ${rpId}`)
 
   return {
     id: record.credId,

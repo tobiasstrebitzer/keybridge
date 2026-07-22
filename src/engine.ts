@@ -35,8 +35,10 @@ export interface NpmRunResult {
   json: NpmJson | null
 }
 
-/** Gets the human to the WebAuthn ceremony; aborted via `signal` once done. */
-export type Presenter = (opts: { authUrl: string, signal: AbortSignal }) => Promise<unknown> | unknown
+/** Gets the human to the WebAuthn ceremony; aborted via `signal` once done.
+ * `purpose` says which ceremony this is - presenters use it to phrase the
+ * approval prompt (e.g. the Touch ID reason line). */
+export type Presenter = (opts: { authUrl: string, signal: AbortSignal, purpose?: 'login' | 'publish' }) => Promise<unknown> | unknown
 
 export interface StatusEvent {
   phase: 'publish-attempt' | 'login-required' | 'minting-session' | 'awaiting-human' | 'login-complete' | 'publish-retry'
@@ -94,6 +96,16 @@ const parseJson = (text: string): NpmJson | null => {
   const i = trimmed.indexOf('{')
   if (i === -1) return null
   try { return JSON.parse(trimmed.slice(i)) } catch { return null }
+}
+
+/** "name@version" of the package in `cwd` - used to describe a publish in
+ * human-facing approval prompts. Null when there is no readable manifest. */
+export function packageId (cwd: string): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')) as { name?: string, version?: string }
+    if (!pkg.name) return null
+    return pkg.version ? `${pkg.name}@${pkg.version}` : pkg.name
+  } catch { return null }
 }
 
 export interface RunNpmOptions {
@@ -230,7 +242,7 @@ export async function loginWithWebAuth ({
   const { loginUrl, doneUrl } = body
 
   onStatus({ phase: 'awaiting-human', authUrl: loginUrl, purpose: 'login' })
-  const token = await presentAndPoll(presenter, loginUrl, doneUrl, { timeoutMs: pollTimeoutMs, fetchImpl })
+  const token = await presentAndPoll(presenter, loginUrl, doneUrl, { purpose: 'login', timeoutMs: pollTimeoutMs, fetchImpl })
 
   const npmrc = writeAuthToken(registry, token, { npmArgs })
   onStatus({ phase: 'login-complete', npmrc })
@@ -328,14 +340,14 @@ async function presentAndPoll (
   presenter: Presenter,
   authUrl: string,
   doneUrl: string,
-  { authToken, timeoutMs, fetchImpl }:
-  { authToken?: string | null, timeoutMs: number, fetchImpl?: FetchLike },
+  { authToken, timeoutMs, fetchImpl, purpose }:
+  { authToken?: string | null, timeoutMs: number, fetchImpl?: FetchLike, purpose?: 'login' | 'publish' },
 ): Promise<string> {
   const presenterAbort = new AbortController()
   const pollAbort = new AbortController()
   let presenterError: Error | null = null
   const presentation = Promise.resolve()
-    .then(() => presenter({ authUrl, signal: presenterAbort.signal }))
+    .then(() => presenter({ authUrl, signal: presenterAbort.signal, ...(purpose ? { purpose } : {}) }))
     .catch((e: Error) => { presenterError = e; if ((e as PublishError).fatal) pollAbort.abort() })
 
   try {
@@ -479,7 +491,7 @@ export async function publishWithWebAuth ({
   }
 
   onStatus({ phase: 'awaiting-human', authUrl, purpose: 'publish' })
-  const otp = await presentAndPoll(presenter, authUrl, doneUrl, { authToken, timeoutMs: pollTimeoutMs })
+  const otp = await presentAndPoll(presenter, authUrl, doneUrl, { authToken, timeoutMs: pollTimeoutMs, purpose: 'publish' })
 
   onStatus({ phase: 'publish-retry' })
   const second = await runNpm(['publish', '--json', ...npmArgs, `--otp=${otp}`], { cwd, npmBin, env })

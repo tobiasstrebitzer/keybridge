@@ -14,7 +14,7 @@
 // timers are throttled while hidden, but the presenter drives the page via
 // `eval`, which is not throttled.
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,7 +22,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { PublishError, type Presenter } from '../engine.ts'
-import { prefillScript, STATUS_SCRIPT } from './shared.ts'
+import { CAPTURE_SCRIPT, prefillScript, STATUS_SCRIPT } from './shared.ts'
 import { handleCreate, handleGet, type CreateOptions, type GetOptions } from '../webauthn.ts'
 import { createSigner } from '../signer.ts'
 
@@ -34,7 +34,25 @@ const NATIVE_DIR = resolve(join(HERE, '..', '..', 'native'))
 export type WebAuthnResponse =
   | { ok: true, credential: unknown }
   | { ok: false, error: string, code?: string }
-export type WebAuthnResponder = (op: string, options: unknown, origin: string) => Promise<WebAuthnResponse>
+/** `reason` (when given) is the human-readable approval line for the Touch ID
+ * dialog - phrased by the presenter from its ceremony context + purpose. */
+export type WebAuthnResponder = (op: string, options: unknown, origin: string, reason?: string) => Promise<WebAuthnResponse>
+
+/** What this shell session is authorizing - feeds the Touch ID reason line. */
+export interface CeremonyContext {
+  /** package id being published, e.g. "keybridge@0.5.1" */
+  pkg?: string
+  /** npm account the ceremony runs as */
+  user?: string
+}
+
+/** The Touch ID dialog renders “"KeyBridge" is trying to <this>.” */
+export function ceremonyReason (purpose: 'login' | 'publish' | undefined, ctx: CeremonyContext | undefined): string | undefined {
+  const asUser = ctx?.user ? ` as ${ctx.user}` : ''
+  if (purpose === 'publish') return `publish ${ctx?.pkg ?? 'a package'} to npm${asUser}`
+  if (purpose === 'login') return `log in to npm${asUser}`
+  return undefined
+}
 
 export interface WebkitPresenterOptions {
   /** Compiled shell binary. Default ~/.keybridge/keybridge-webshell (auto-built from shellSource when missing/stale). */
@@ -49,6 +67,9 @@ export interface WebkitPresenterOptions {
   /** When npm bounces to a password login, prefill this username and focus
    * the password field (the flow knows who it is logging in as). */
   prefillUsername?: string
+  /** What this ceremony authorizes (package, account) - shown in the Touch ID
+   * dialog so concurrent publishes can never be confused. */
+  ceremonyContext?: CeremonyContext
   /** Extra args for the shell (tests use ['--ephemeral']). */
   shellArgs?: string[]
   /** Answers create/get ceremonies. Default: v2 host webauthn + signer (Touch ID via Secure Enclave backend). */
@@ -57,6 +78,10 @@ export interface WebkitPresenterOptions {
   surfaceOnLogin?: boolean
   pollIntervalMs?: number
   launchTimeoutMs?: number
+  /** Write a JSON snapshot of every distinct page state the shell renders
+   * into this directory (DOM debugging). Default: a timestamped dir under
+   * ~/.keybridge/captures when KEYBRIDGE_CAPTURE_DOM is set, else off. */
+  captureDir?: string
   /** Diagnostics sink (default: stderr). */
   log?: (message: string) => void
   /** Attention hook for surfaced-window / dead-end moments (default: none -
@@ -70,6 +95,8 @@ interface ResolvedOptions {
   injectPath: string
   shellArgs: string[]
   prefillUsername?: string
+  ceremonyContext?: CeremonyContext
+  captureDir?: string
   webauthn: WebAuthnResponder
   surfaceOnLogin: boolean
   pollIntervalMs: number
@@ -91,12 +118,57 @@ export function resolveWebkitOptions (opts: WebkitPresenterOptions = {}): Resolv
       ...(opts.shellArgs ?? []),
     ],
     ...(opts.prefillUsername ? { prefillUsername: opts.prefillUsername } : {}),
+    ...(opts.ceremonyContext ? { ceremonyContext: opts.ceremonyContext } : {}),
+    ...(resolveCaptureDir(opts.captureDir)),
     webauthn: opts.webauthn ?? answerWebAuthn,
     surfaceOnLogin: opts.surfaceOnLogin ?? true,
     pollIntervalMs: opts.pollIntervalMs ?? 500,
     launchTimeoutMs: opts.launchTimeoutMs ?? 15_000,
     log: opts.log ?? ((m) => process.stderr.write(`[keybridge webkit] ${m}\n`)),
     notify: opts.notify ?? (() => {}),
+  }
+}
+
+function resolveCaptureDir (explicit?: string): { captureDir?: string } {
+  if (explicit) return { captureDir: explicit }
+  if (!process.env.KEYBRIDGE_CAPTURE_DOM) return {}
+  return { captureDir: join(KB_DIR, 'captures', new Date().toISOString().replace(/[:.]/g, '-')) }
+}
+
+/**
+ * DOM debugging (KEYBRIDGE_CAPTURE_DOM): snapshots the page via
+ * CAPTURE_SCRIPT on every tick and writes each DISTINCT state (url + html
+ * fingerprint) to <captureDir>/NN.json - so one real ceremony records the
+ * exact DOM of every npm auth page it passed through.
+ */
+export class DomCapture {
+  #dir: string
+  #log: (m: string) => void
+  #seq = 0
+  #lastSig = ''
+
+  constructor (dir: string, log: (m: string) => void) {
+    this.#dir = dir
+    this.#log = log
+    log(`DOM capture enabled -> ${dir}`)
+  }
+
+  async tick (shell: WebShell): Promise<void> {
+    const raw = await shell.eval(CAPTURE_SCRIPT).catch(() => null)
+    if (typeof raw !== 'string') return
+    let snap: { url?: string, html?: string }
+    try { snap = JSON.parse(raw) as { url?: string, html?: string } } catch { return }
+    const sig = `${snap.url}#${snap.html?.length ?? 0}`
+    if (sig === this.#lastSig) return
+    this.#lastSig = sig
+    const file = join(this.#dir, `${String(++this.#seq).padStart(2, '0')}.json`)
+    try {
+      mkdirSync(this.#dir, { recursive: true })
+      writeFileSync(file, raw)
+      this.#log(`captured page state ${this.#seq}: ${snap.url}`)
+    } catch (e) {
+      this.#log(`capture write failed: ${(e as Error).message}`)
+    }
   }
 }
 
@@ -118,13 +190,13 @@ export function unwrap (v: unknown): unknown {
 // Default ceremony responder. Note: the secure-enclave signer shells out
 // synchronously, so the event loop stalls while the human decides on Touch ID;
 // that's fine - the engine's doneUrl polling just resumes afterwards.
-async function answerWebAuthn (op: string, options: unknown, origin: string): Promise<WebAuthnResponse> {
+async function answerWebAuthn (op: string, options: unknown, origin: string, reason?: string): Promise<WebAuthnResponse> {
   try {
     const signer = createSigner()
     const opts = unwrap(options)
     const credential = op === 'create'
       ? await handleCreate(opts as CreateOptions, origin, signer)
-      : await handleGet(opts as GetOptions, origin, signer)
+      : await handleGet(opts as GetOptions, origin, signer, reason)
     return { ok: true, credential }
   } catch (e) {
     const err = e as Error & { code?: string }
@@ -287,6 +359,15 @@ export async function openSurfacedShell (url: string, opts: WebkitPresenterOptio
   const shell = await WebShell.start(o)
   shell.send({ cmd: 'navigate', url })
   shell.send({ cmd: 'surface' })
+  // Surfaced sessions have no drive loop; when DOM capture is on, snapshot on
+  // a timer instead (KEYBRIDGE_CAPTURE_DOM=1 keybridge open <url> records the
+  // pages the human walks through).
+  if (o.captureDir) {
+    const capture = new DomCapture(o.captureDir, o.log)
+    const timer = setInterval(() => { void capture.tick(shell) }, 1000)
+    timer.unref()
+    void shell.exited.then(() => clearInterval(timer))
+  }
   return shell
 }
 
@@ -315,9 +396,13 @@ export async function purgeWebStore (storeId: string, opts: WebkitPresenterOptio
 export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
   const o = resolveWebkitOptions(opts)
 
-  return async ({ authUrl, signal }) => {
+  return async ({ authUrl, signal, purpose }) => {
     if (signal.aborted) return
     await ensureShellBinary(o)
+
+    // The Touch ID approval line for this ceremony - names the package and
+    // account so concurrent multi-project publishes can never be confused.
+    const reason = ceremonyReason(purpose, o.ceremonyContext)
 
     // A ceremony the credential store can't answer (ENOCRED) never completes
     // while the shell is hidden: the inject script's fallback to the real
@@ -330,7 +415,7 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
     const run: ResolvedOptions = {
       ...o,
       webauthn: async (op, options, origin) => {
-        const resp = await o.webauthn(op, options, origin)
+        const resp = await o.webauthn(op, options, origin, reason)
         if (!resp.ok && resp.code === 'ENOCRED' && !state.surfaced) {
           const err = new PublishError(
             'npm asked for a security key that keybridge has not enrolled for this account - run `keybridge enroll` for it (`keybridge status` shows which accounts have keys)',
@@ -355,11 +440,19 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
       // One-click-per-page and one-prefill-per-page are enforced by window
       // flags INSIDE the page (they reset on navigation), so the presenter
       // needs no navigation bookkeeping at all.
+      const capture = run.captureDir ? new DomCapture(run.captureDir, o.log) : null
       let announcedClick = false
       let announcedPrefill = false
       while (!signal.aborted) {
         if (state.fatal) throw state.fatal
-        const status = await shell.eval(STATUS_SCRIPT).catch(() => 'pending')
+        const raw = await shell.eval(STATUS_SCRIPT).catch(() => 'pending')
+        // A '+remember' suffix means the page's "don't ask again for 5
+        // minutes" checkbox was just ticked (see STATUS_SCRIPT).
+        const [status, flag] = String(raw).split('+')
+        if (flag === 'remember') {
+          o.log('ticked npm\'s "remember for 5 minutes" option - publishes in the next 5 minutes should skip the ceremony')
+        }
+        await capture?.tick(shell)
         if (status === 'clicked' && !announcedClick) {
           announcedClick = true
           o.log('ceremony triggered - waiting for Touch ID approval')

@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { shellIsFresh, unwrap, webkitPresenter, type WebkitPresenterOptions } from '../src/presenters/webkit.ts'
+import { ceremonyReason, shellIsFresh, unwrap, webkitPresenter, type WebkitPresenterOptions } from '../src/presenters/webkit.ts'
 import { STATUS_SCRIPT } from '../src/presenters/shared.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -175,6 +175,27 @@ test('prefills the login form (page-side idempotence, focus to password)', async
   assert.match(prefills[0]!.js as string, /__keybridgePrefilled/, 'one prefill per page is enforced inside the page')
 })
 
+test('a +remember status suffix still counts as its base status and is logged', async (t) => {
+  const run = makeRun({ FAKE_EVALS: 'not-found,clicked+remember,clicked' })
+  t.after(run.dispose)
+
+  const logs: string[] = []
+  const abort = new AbortController()
+  t.after(() => abort.abort()) // a failed assertion must not leave the drive loop running
+  const presentation = webkitPresenter(presenterOpts({ log: (m) => logs.push(m) }))({
+    authUrl: 'https://www.npmjs.com/auth/cli/uuid-8',
+    signal: abort.signal,
+  })
+  await until(() => {
+    try { return run.commands().filter((c) => c.cmd === 'eval').length >= 3 } catch { return false }
+  })
+  abort.abort()
+  await presentation
+
+  assert.ok(logs.some((m) => /remember for 5 minutes/.test(m)), 'remember tick is surfaced to the log')
+  assert.ok(logs.some((m) => /ceremony triggered/.test(m)), 'clicked+remember still announces the click')
+})
+
 test('keeps polling after a click so chained pages get their own click', async (t) => {
   // A live npm session chains pages: the first click (on /login) navigates to
   // /escalate/webauthn, whose OWN "Use security key" button fires the actual
@@ -254,6 +275,46 @@ test('ENOCRED during a hidden ceremony fails the presentation fast', async (t) =
   await until(() => run.commands().some((c) => c.cmd === 'webauthn-result'))
   assert.equal(notifications.length, 1)
   assert.match(notifications[0]!, /enroll/)
+})
+
+test('the ceremony purpose + context become the Touch ID reason for the responder', async (t) => {
+  const run = makeRun({
+    FAKE_EVALS: 'clicked',
+    FAKE_WEBAUTHN: JSON.stringify({
+      op: 'get',
+      options: { challenge: { $b64: 'AQIDBA' } },
+      origin: 'https://www.npmjs.com',
+    }),
+  })
+  t.after(run.dispose)
+
+  const reasons: Array<string | undefined> = []
+  const abort = new AbortController()
+  t.after(() => abort.abort()) // a failed assertion must not leave the drive loop running
+  const presentation = webkitPresenter(presenterOpts({
+    ceremonyContext: { pkg: 'keybridge@9.9.9', user: 'tstrebitzer' },
+    webauthn: async (_op, _options, _origin, reason) => {
+      reasons.push(reason)
+      return { ok: true, credential: { id: 'fake-cred' } }
+    },
+  }))({ authUrl: 'https://www.npmjs.com/auth/cli/uuid-9', signal: abort.signal, purpose: 'publish' })
+
+  await until(() => {
+    try { return run.commands().some((c) => c.cmd === 'webauthn-result') } catch { return false }
+  })
+  abort.abort()
+  await presentation
+
+  assert.deepEqual(reasons, ['publish keybridge@9.9.9 to npm as tstrebitzer'])
+})
+
+test('ceremonyReason phrases every purpose/context combination', () => {
+  assert.equal(ceremonyReason('publish', { pkg: 'a@1.0.0', user: 'bob' }), 'publish a@1.0.0 to npm as bob')
+  assert.equal(ceremonyReason('publish', { pkg: 'a@1.0.0' }), 'publish a@1.0.0 to npm')
+  assert.equal(ceremonyReason('publish', undefined), 'publish a package to npm')
+  assert.equal(ceremonyReason('login', { user: 'bob' }), 'log in to npm as bob')
+  assert.equal(ceremonyReason('login', undefined), 'log in to npm')
+  assert.equal(ceremonyReason(undefined, { pkg: 'a@1.0.0' }), undefined, 'no purpose -> default rpId phrasing downstream')
 })
 
 test('unwrap undoes the inject script buffer serialization', () => {

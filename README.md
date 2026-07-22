@@ -98,6 +98,13 @@ falls back to your default browser.
   in a compact bottom-center sheet, username prefilled, password focused.
 - **Hardware-gated** - the passkey lives in the Secure Enclave,
   non-extractable; every signature requires your touch. No touch, no publish.
+- **Self-describing approvals** - the Touch ID dialog names exactly what it
+  authorizes ("KeyBridge" is trying to **publish mypkg@1.2.3 to npm as
+  youruser**), so concurrent publishes from multi-agent sessions can never be
+  confused.
+- **One touch per 5 minutes for bulk publishes** - keybridge ticks npm's
+  "don't challenge again for 5 minutes" option during the ceremony; a chain
+  of related packages published back-to-back needs a single approval.
 - **Identity-aware** - `npm whoami` drives everything. Per-account browser
   profiles, instant account switching via a token vault, and publishes that
   can be pinned to (or mediated as) a specific account.
@@ -119,6 +126,14 @@ keybridge publish --presenter browser  # force the default-browser fallback
 Expired sessions are handled automatically: a publish that hits `E401` runs the
 web-login ceremony first (one extra touch), persists the token to your npmrc,
 then completes the publish.
+
+Publishing several packages in sequence needs only the first touch: the
+ceremony opts into npm's 5-minute cooldown, so follow-up publishes inside the
+window complete with no ceremony at all. For debugging there are
+`KEYBRIDGE_SE_DEBUG=1` (traces the Touch ID helper to stderr),
+`KEYBRIDGE_CAPTURE_DOM=1` (snapshots every auth-page state to
+`~/.keybridge/captures/`), and `scripts/debug-touchid.sh` (reproduces a chain
+of Touch ID prompts without npm).
 
 ## Accounts
 

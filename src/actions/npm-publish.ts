@@ -13,7 +13,7 @@ import { createAction, type Logger, type SilkweaveContext } from '@silkweave/cor
 import { resolve, sep } from 'node:path'
 import { z } from 'zod/v4'
 import { assertSecurityKeyFor, bindAccount, bindAfterLogin, resolveMediation, resolvePublishIdentity, whoami, type Mediation } from '../accounts.ts'
-import { publishWithWebAuth, resolveRegistry, PublishError, type StatusEvent } from '../engine.ts'
+import { packageId, publishWithWebAuth, resolveRegistry, PublishError, type StatusEvent } from '../engine.ts'
 import { selectPresenter } from '../presenters/select.ts'
 
 const PROJECT_ROOT = process.cwd()
@@ -104,8 +104,14 @@ export const NpmPublishAction = createAction({
       }
     }
     const prefillUsername = publishUser ?? identity.active
+    const pkgId = packageId(cwd)
     const { name: presenterName, presenter } = selectPresenter(undefined, {
-      webkit: { storeId, ...(prefillUsername ? { prefillUsername } : {}) },
+      webkit: {
+        storeId,
+        ...(prefillUsername ? { prefillUsername } : {}),
+        // Names the package + account in the Touch ID dialog.
+        ceremonyContext: { ...(pkgId ? { pkg: pkgId } : {}), ...(prefillUsername ? { user: prefillUsername } : {}) },
+      },
     })
     if (publishUser && presenterName === 'webkit' && !dryRun) {
       const registry = mediation?.registry

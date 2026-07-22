@@ -25,7 +25,7 @@ import {
   twoFactorMode, whoami, whoamiWithToken, type Mediation,
 } from './accounts.ts'
 import { deleteToken, getToken, listTokenMeta, saveToken } from './tokens.ts'
-import { publishWithWebAuth, resolveRegistry, runNpm, PublishError, type StatusEvent } from './engine.ts'
+import { packageId, publishWithWebAuth, resolveRegistry, runNpm, PublishError, type StatusEvent } from './engine.ts'
 import { defaultPresenterName, selectPresenter, type PresenterName } from './presenters/select.ts'
 import { openSurfacedShell, purgeWebStore } from './presenters/webkit.ts'
 import { listCredentials, paths, stampUsername } from './signer.ts'
@@ -303,8 +303,14 @@ try {
     }
 
     const prefillUsername = publishUser ?? identity.active
+    const pkg = packageId(process.cwd())
     const { presenter } = selectPresenter(presenterChoice, {
-      webkit: { storeId, ...(prefillUsername ? { prefillUsername } : {}) },
+      webkit: {
+        storeId,
+        ...(prefillUsername ? { prefillUsername } : {}),
+        // Names the package + account in the Touch ID dialog.
+        ceremonyContext: { ...(pkg ? { pkg } : {}), ...(prefillUsername ? { user: prefillUsername } : {}) },
+      },
     })
     const outcome = await publishWithWebAuth({
       npmArgs, presenter, pollTimeoutMs, onStatus,
