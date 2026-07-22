@@ -139,6 +139,11 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   The checkbox on /escalate/webauthn has an EMPTY <label>; match on the
   input's aria-label ("Do not challenge npm publish ... for the next 5
   minutes") or name/id (`didOptForCooldown`), never on label text.
+  Two corollaries (proven live): the cooldown does NOT cover `npm unpublish`
+  (always challenged), and while it is active `mintWebAuthSession` gets a 422
+  (challenge suppressed → the metadata-only PUT hits real body validation) -
+  wait out the window before minting. A publish-minted OTP IS accepted by
+  `npm unpublish --otp` (how the smoke-test package was cleaned up).
 - Ceremony context (pkg name@version + account) threads engine →
   presenter (`purpose` on the Presenter call) → `ceremonyContext` webkit
   option → webauthn responder → `handleGet` → signer, so the Touch ID sheet
