@@ -1,7 +1,7 @@
 {
   "name": "keybridge",
   "displayName": "keybridge",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Publish to npm with nothing but a Touch ID tap: Claude initiates the publish, you approve via WebAuthn. Raw `npm publish` in Bash is blocked in favor of the gated bridge tool.",
   "author": {
     "name": "Tobias Strebitzer",
