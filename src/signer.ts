@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { kblog } from './log.ts'
 
 const KB_DIR = join(homedir(), '.keybridge')
 const STORE = join(KB_DIR, 'credentials.json')
@@ -83,13 +84,23 @@ export function createSigner ({
   // raw execFileSync throw, so e.g. a Touch ID presentation failure reads
   // "user presence check failed: notInteractive", not "command failed".
   const runHelper = (args: string[]): string => {
+    // The helper call is synchronous and includes the human's Touch ID
+    // think-time - log both edges so a sheet that never appeared (the
+    // frontmost-process flake) is distinguishable from a slow human.
+    const started = Date.now()
     try {
-      return execFileSync(helperPath, args, { encoding: 'utf8' })
+      const out = execFileSync(helperPath, args, { encoding: 'utf8' })
+      kblog('se-helper', { op: args[0], ok: true, ms: Date.now() - started })
+      return out
     } catch (e) {
       let parsed: { error?: string, code?: string } = {}
       try { parsed = JSON.parse(String((e as { stdout?: string }).stdout ?? '').trim()) } catch {}
       const err = new Error(parsed.error ?? `Secure Enclave helper failed: ${(e as Error).message}`) as Error & { code?: string }
       if (parsed.code) err.code = parsed.code
+      kblog('se-helper', {
+        op: args[0], ok: false, ms: Date.now() - started,
+        error: err.message, ...(parsed.code ? { code: parsed.code } : {}),
+      })
       throw err
     }
   }

@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { kblog } from './log.ts'
 
 export interface NpmErrorJson {
   code?: string
@@ -41,7 +42,7 @@ export interface NpmRunResult {
 export type Presenter = (opts: { authUrl: string, signal: AbortSignal, purpose?: 'login' | 'publish' }) => Promise<unknown> | unknown
 
 export interface StatusEvent {
-  phase: 'publish-attempt' | 'login-required' | 'minting-session' | 'awaiting-human' | 'login-complete' | 'publish-retry'
+  phase: 'publish-attempt' | 'login-required' | 'minting-session' | 'awaiting-human' | 'presenter-failed' | 'login-complete' | 'publish-retry'
   authUrl?: string
   purpose?: 'login' | 'publish'
   npmrc?: string
@@ -242,7 +243,7 @@ export async function loginWithWebAuth ({
   const { loginUrl, doneUrl } = body
 
   onStatus({ phase: 'awaiting-human', authUrl: loginUrl, purpose: 'login' })
-  const token = await presentAndPoll(presenter, loginUrl, doneUrl, { purpose: 'login', timeoutMs: pollTimeoutMs, fetchImpl })
+  const token = await presentAndPoll(presenter, loginUrl, doneUrl, { purpose: 'login', timeoutMs: pollTimeoutMs, fetchImpl, onStatus })
 
   const npmrc = writeAuthToken(registry, token, { npmArgs })
   onStatus({ phase: 'login-complete', npmrc })
@@ -340,15 +341,23 @@ async function presentAndPoll (
   presenter: Presenter,
   authUrl: string,
   doneUrl: string,
-  { authToken, timeoutMs, fetchImpl, purpose }:
-  { authToken?: string | null, timeoutMs: number, fetchImpl?: FetchLike, purpose?: 'login' | 'publish' },
+  { authToken, timeoutMs, fetchImpl, purpose, onStatus }:
+  { authToken?: string | null, timeoutMs: number, fetchImpl?: FetchLike, purpose?: 'login' | 'publish', onStatus?: OnStatus },
 ): Promise<string> {
   const presenterAbort = new AbortController()
   const pollAbort = new AbortController()
   let presenterError: Error | null = null
   const presentation = Promise.resolve()
     .then(() => presenter({ authUrl, signal: presenterAbort.signal, ...(purpose ? { purpose } : {}) }))
-    .catch((e: Error) => { presenterError = e; if ((e as PublishError).fatal) pollAbort.abort() })
+    .catch((e: Error) => {
+      presenterError = e
+      const fatal = Boolean((e as PublishError).fatal)
+      // Without this, a dead presenter looks like a hang: the poll keeps
+      // waiting for a human who was never shown anything.
+      kblog('presenter-failed', { purpose, fatal, code: (e as PublishError).code, error: e.message })
+      onStatus?.({ phase: 'presenter-failed', purpose, code: (e as PublishError).code })
+      if (fatal) pollAbort.abort()
+    })
 
   try {
     return await pollDoneUrl(doneUrl, {
@@ -491,7 +500,7 @@ export async function publishWithWebAuth ({
   }
 
   onStatus({ phase: 'awaiting-human', authUrl, purpose: 'publish' })
-  const otp = await presentAndPoll(presenter, authUrl, doneUrl, { authToken, timeoutMs: pollTimeoutMs, purpose: 'publish' })
+  const otp = await presentAndPoll(presenter, authUrl, doneUrl, { authToken, timeoutMs: pollTimeoutMs, purpose: 'publish', onStatus })
 
   onStatus({ phase: 'publish-retry' })
   const second = await runNpm(['publish', '--json', ...npmArgs, `--otp=${otp}`], { cwd, npmBin, env })

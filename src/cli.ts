@@ -10,6 +10,7 @@
 //   keybridge open [url]            # surfaced keybridge window on the current account's profile
 //   keybridge token <ls|set|rm> [username] [token]   # per-account token vault
 //   keybridge publish [--user <name>] [--] [npm publish args...]
+//   keybridge logs [n]              # tail the persistent ceremony diagnostics (~/.keybridge/logs)
 //
 // login/switch/publish also accept [--poll-timeout <sec>] [--presenter webkit|browser].
 //
@@ -17,7 +18,7 @@
 // its own WKWebsiteDataStore (browser profile), so switching accounts never
 // clobbers another account's web session, and after every login the local
 // bindings re-sync to whatever whoami reports (see src/accounts.ts).
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import {
   accountsStatus, assertSecurityKeyFor, bindAccount, bindAfterLogin, candidateStoreId,
@@ -28,11 +29,12 @@ import { deleteToken, getToken, listTokenMeta, saveToken } from './tokens.ts'
 import { packageId, publishWithWebAuth, resolveRegistry, runNpm, PublishError, type StatusEvent } from './engine.ts'
 import { defaultPresenterName, selectPresenter, type PresenterName } from './presenters/select.ts'
 import { openSurfacedShell, purgeWebStore } from './presenters/webkit.ts'
+import { latestLogFile } from './log.ts'
 import { listCredentials, paths, stampUsername } from './signer.ts'
 import { runSetup } from './setup.ts'
 import { join } from 'node:path'
 
-const USAGE = 'usage: keybridge <setup|status|enroll|login|switch|logout|open|token|publish> ' +
+const USAGE = 'usage: keybridge <setup|status|enroll|login|switch|logout|open|token|publish|logs> ' +
   '[--user <name>] [--poll-timeout <sec>] [--presenter webkit|browser] [--web] [--] [npm args...]'
 
 const [, , command, ...rest] = process.argv
@@ -77,6 +79,22 @@ if (command === 'status' || command === 'whoami') {
     console.log(`  (${status.unlinkedKeys} security ${status.unlinkedKeys === 1 ? 'key' : 'keys'} not linked to an account yet)`)
   }
   for (const w of status.warnings) console.log(`\n⚠ ${w}`)
+  process.exit(0)
+}
+
+// logs: tail the persistent ceremony diagnostics. Every ceremony stage logs
+// to ~/.keybridge/logs (CLI and MCP alike) - this is where to look when a
+// ceremony hung or Touch ID never appeared, since MCP hosts drop stderr.
+if (command === 'logs') {
+  const n = Number(rest.find((a) => /^\d+$/.test(a)) ?? 50)
+  const file = latestLogFile()
+  if (!file) {
+    console.error('no keybridge logs yet - ceremonies write to ~/.keybridge/logs/ as they run')
+    process.exit(0)
+  }
+  const lines = readFileSync(file, 'utf8').trimEnd().split('\n')
+  console.error(`# ${file} - last ${Math.min(n, lines.length)} of ${lines.length} lines`)
+  for (const l of lines.slice(-n)) console.log(l)
   process.exit(0)
 }
 
@@ -241,6 +259,9 @@ const onStatus = ({ phase, authUrl, purpose, npmrc, code }: StatusEvent) => {
     console.error(`· npm requires human ${what} - presenting via ${presenterName}`)
     console.error(`  ${authUrl}`)
     console.error('  → touch your security key / Touch ID to approve')
+  }
+  if (phase === 'presenter-failed') {
+    console.error(`⚠ the ${presenterName} presenter failed${code ? ` (${code})` : ''} - if the URL above is open you can still finish there; \`keybridge logs\` has the trace`)
   }
   if (phase === 'login-complete') console.error(`· logged in - session token saved to ${npmrc}`)
   if (phase === 'publish-retry') console.error('· verified - completing publish ...')

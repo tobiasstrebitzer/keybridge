@@ -22,6 +22,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { PublishError, type Presenter } from '../engine.ts'
+import { kblog } from '../log.ts'
 import { CAPTURE_SCRIPT, prefillScript, STATUS_SCRIPT } from './shared.ts'
 import { handleCreate, handleGet, type CreateOptions, type GetOptions } from '../webauthn.ts'
 import { createSigner } from '../signer.ts'
@@ -124,7 +125,11 @@ export function resolveWebkitOptions (opts: WebkitPresenterOptions = {}): Resolv
     surfaceOnLogin: opts.surfaceOnLogin ?? true,
     pollIntervalMs: opts.pollIntervalMs ?? 500,
     launchTimeoutMs: opts.launchTimeoutMs ?? 15_000,
-    log: opts.log ?? ((m) => process.stderr.write(`[keybridge webkit] ${m}\n`)),
+    // stderr for CLI users; the persistent log because MCP hosts drop stderr.
+    log: opts.log ?? ((m) => {
+      process.stderr.write(`[keybridge webkit] ${m}\n`)
+      kblog('webkit', { msg: m })
+    }),
     notify: opts.notify ?? (() => {}),
   }
 }
@@ -191,15 +196,21 @@ export function unwrap (v: unknown): unknown {
 // synchronously, so the event loop stalls while the human decides on Touch ID;
 // that's fine - the engine's doneUrl polling just resumes afterwards.
 async function answerWebAuthn (op: string, options: unknown, origin: string, reason?: string): Promise<WebAuthnResponse> {
+  const started = Date.now()
   try {
     const signer = createSigner()
     const opts = unwrap(options)
     const credential = op === 'create'
       ? await handleCreate(opts as CreateOptions, origin, signer)
       : await handleGet(opts as GetOptions, origin, signer, reason)
+    kblog('webauthn', { op, origin, ok: true, ms: Date.now() - started })
     return { ok: true, credential }
   } catch (e) {
     const err = e as Error & { code?: string }
+    kblog('webauthn', {
+      op, origin, ok: false, ms: Date.now() - started,
+      error: err.message || String(e), ...(err.code ? { code: err.code } : {}),
+    })
     return { ok: false, error: err.message || String(e), ...(err.code ? { code: err.code } : {}) }
   }
 }
@@ -398,7 +409,9 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
 
   return async ({ authUrl, signal, purpose }) => {
     if (signal.aborted) return
-    await ensureShellBinary(o)
+    kblog('ceremony-start', {
+      purpose, authUrl, shellArgs: o.shellArgs, ...o.ceremonyContext,
+    })
 
     // The Touch ID approval line for this ceremony - names the package and
     // account so concurrent multi-project publishes can never be confused.
@@ -428,7 +441,26 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
       },
     }
 
-    const shell = await WebShell.start(run)
+    // The windowless shell is the ONLY way this ceremony can complete:
+    // nothing is on screen and no human is watching a browser, so a shell
+    // that cannot start (or dies mid-ceremony) means waiting out the poll
+    // timeout would just be a silent hang. Both cases are FATAL - the engine
+    // aborts doneUrl polling immediately and the caller gets a diagnosable
+    // error instead of five quiet minutes.
+    let shell: WebShell
+    try {
+      await ensureShellBinary(o)
+      shell = await WebShell.start(run)
+    } catch (e) {
+      const err = new PublishError(
+        `the webkit ceremony shell could not start: ${(e as Error).message} - nothing was shown; \`keybridge logs\` has the ceremony trace`,
+        { code: 'ESHELL' })
+      err.fatal = true
+      kblog('ceremony-failed', { code: 'ESHELL', error: (e as Error).message })
+      throw err
+    }
+    const shellExit = { code: undefined as number | null | undefined }
+    void shell.exited.then((code) => { shellExit.code = code })
     try {
       shell.send({ cmd: 'navigate', url: authUrl })
 
@@ -445,6 +477,15 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
       let announcedPrefill = false
       while (!signal.aborted) {
         if (state.fatal) throw state.fatal
+        if (shellExit.code !== undefined) {
+          // A dead shell would otherwise be invisible: every eval rejects and
+          // reads as 'pending' forever (the exact shape of a silent hang).
+          const err = new PublishError(
+            `the webkit ceremony shell exited unexpectedly (code ${shellExit.code ?? 'unknown'}) - the ceremony can never complete; \`keybridge logs\` has the ceremony trace`,
+            { code: 'ESHELL' })
+          err.fatal = true
+          throw err
+        }
         const raw = await shell.eval(STATUS_SCRIPT).catch(() => 'pending')
         // A '+remember' suffix means the page's "don't ask again for 5
         // minutes" checkbox was just ticked (see STATUS_SCRIPT).
@@ -474,7 +515,13 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
         await delay(o.pollIntervalMs, null, { signal }).catch(() => {})
       }
       if (state.fatal) throw state.fatal
+    } catch (e) {
+      kblog('ceremony-failed', {
+        code: (e as PublishError).code ?? 'EPRESENT', error: (e as Error).message,
+      })
+      throw e
     } finally {
+      kblog('ceremony-end', { aborted: signal.aborted })
       shell.close()
     }
   }

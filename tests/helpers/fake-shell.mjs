@@ -11,8 +11,13 @@
 //   FAKE_ARGV_LOG file the shell's argv is written to on startup (JSON array)
 //   FAKE_NAV_AFTER_EVALS  emit a nav event right after the Nth eval (page
 //                 chain simulation, e.g. /login -> /escalate/webauthn)
+//   FAKE_DIE      exit(7) immediately, before the ready event (launch failure)
+//   FAKE_EXIT_AFTER_EVALS  exit(86) right after answering the Nth eval
+//                 (mid-ceremony shell crash simulation)
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
+
+if (process.env.FAKE_DIE) process.exit(7)
 
 if (process.env.FAKE_ARGV_LOG) appendFileSync(process.env.FAKE_ARGV_LOG, JSON.stringify(process.argv.slice(2)) + '\n')
 
@@ -36,6 +41,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     if (String(evalCount) === process.env.FAKE_NAV_AFTER_EVALS) {
       out({ event: 'nav', url: 'https://www.npmjs.com/escalate/webauthn' })
     }
+    if (String(evalCount) === process.env.FAKE_EXIT_AFTER_EVALS) process.exit(86)
   }
   if (msg.cmd === 'close') process.exit(0)
 })

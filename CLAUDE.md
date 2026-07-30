@@ -43,6 +43,12 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   assembles clientDataJSON/authenticatorData/attestation, stores credentials in
   `~/.keybridge/credentials.json`, signs via Secure Enclave helper (Touch ID)
   or a software P-256 key (tests / non-macOS).
+- `src/log.ts` - persistent ceremony diagnostics (`~/.keybridge/logs/
+  keybridge-<day>.jsonl`, 14-day retention, `KEYBRIDGE_LOG_DIR` override for
+  tests). `kblog()` is fire-and-forget and wired through engine (presenter
+  failures), webkit presenter (ceremony lifecycle + all `o.log` lines),
+  webauthn responder, SE signer (helper timing = Touch ID think-time), and
+  both MCP actions. `keybridge logs [n]` tails it.
 - `src/setup.ts` - `keybridge setup`: compiles both Swift helpers into
   `~/.keybridge/`, probes the Enclave, writes `config.json`.
 - `src/cli.ts` (`keybridge setup|status|enroll|login|switch|logout|open|
@@ -161,8 +167,21 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   (plugin sat at 0.3.3 while the package was at 0.6.0), hence the
   version-parity gate. `marketplace.json` carries no version of its own; the
   plugin manifest is the only lever.
-- The CryptoKit SecureEnclave API stores on-disk key blobs (no keychain
-  entitlement needed) - ad-hoc-signed helper binaries work.
+- **MCP hosts drop the server's stderr after startup** (verified against
+  Claude Code 2026-07-30: its `~/Library/Caches/claude-cli-nodejs/<proj>/
+  mcp-logs-*keybridge*/*.jsonl` files record tool calls/results and
+  startup-phase stderr only - zero presenter output even during a successful
+  ceremony). So stderr diagnostics are invisible exactly where ceremonies
+  fail; `~/.keybridge/logs/` (src/log.ts) is the always-on channel. Those
+  host-side jsonl files are still the place to reconstruct WHAT tools were
+  called when.
+- A presenter failure is non-fatal by design (browser fallback: the human can
+  still open authUrl) - but for the WINDOWLESS webkit presenter that turned
+  real failures into silent 5-minute hangs ("no Touch ID, no error"; the
+  2026-07-30 claude-worker incident: NpmLogin sat 156s with no prompt).
+  Since then: shell-won't-start and shell-died-mid-ceremony throw FATAL
+  `ESHELL` (poll aborts immediately), and any presenter failure emits a
+  `presenter-failed` status event + log line.
 - History: the earlier architecture (MV3 extension → native-messaging host →
   CDP-driven off-screen Chrome, "Tier A") was removed 2026-07-14 in favor of
   the WKWebView shell; `git log` has it if ever needed.

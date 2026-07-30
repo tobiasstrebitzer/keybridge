@@ -121,6 +121,7 @@ keybridge publish --user tstrebitzer # this account, or fail fast / mediate
 keybridge login                      # just the web-login ceremony (~12 h session)
 keybridge status                     # who am I, which accounts/keys/tokens exist
 keybridge publish --presenter browser  # force the default-browser fallback
+keybridge logs                       # tail the persistent ceremony diagnostics
 ```
 
 Expired sessions are handled automatically: a publish that hits `E401` runs the
@@ -129,11 +130,17 @@ then completes the publish.
 
 Publishing several packages in sequence needs only the first touch: the
 ceremony opts into npm's 5-minute cooldown, so follow-up publishes inside the
-window complete with no ceremony at all. For debugging there are
-`KEYBRIDGE_SE_DEBUG=1` (traces the Touch ID helper to stderr),
-`KEYBRIDGE_CAPTURE_DOM=1` (snapshots every auth-page state to
-`~/.keybridge/captures/`), and `scripts/debug-touchid.sh` (reproduces a chain
-of Touch ID prompts without npm).
+window complete with no ceremony at all.
+
+Every ceremony stage (shell, page status, WebAuthn, Touch ID helper) appends
+structured diagnostics to `~/.keybridge/logs/` - `keybridge logs` tails them.
+That is the place to look when a ceremony seems to hang or Touch ID never
+appears, especially through the MCP tools (MCP hosts silently drop the
+server's stderr). For deeper debugging there are `KEYBRIDGE_SE_DEBUG=1`
+(traces the Touch ID helper to stderr), `KEYBRIDGE_CAPTURE_DOM=1` (snapshots
+every auth-page state to `~/.keybridge/captures/`), and
+`scripts/debug-touchid.sh` (reproduces a chain of Touch ID prompts without
+npm).
 
 ## Accounts
 

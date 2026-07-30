@@ -1,12 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { ceremonyReason, shellIsFresh, unwrap, webkitPresenter, type WebkitPresenterOptions } from '../src/presenters/webkit.ts'
 import { STATUS_SCRIPT } from '../src/presenters/shared.ts'
+import { PublishError } from '../src/engine.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FAKE_SHELL = join(HERE, 'helpers', 'fake-shell.mjs')
@@ -18,14 +19,18 @@ function makeRun (env: Record<string, string>) {
   const dir = mkdtempSync(join(tmpdir(), 'keybridge-webkit-'))
   const logFile = join(dir, 'cmds.log')
   const argvFile = join(dir, 'argv.log')
+  const kbLogDir = join(dir, 'kblogs')
   const restore: Array<[string, string | undefined]> = []
-  for (const [k, v] of Object.entries({ ...env, FAKE_LOG: logFile, FAKE_ARGV_LOG: argvFile })) {
+  // KEYBRIDGE_LOG_DIR keeps the presenter's persistent diagnostics out of the
+  // real ~/.keybridge/logs during tests.
+  for (const [k, v] of Object.entries({ ...env, FAKE_LOG: logFile, FAKE_ARGV_LOG: argvFile, KEYBRIDGE_LOG_DIR: kbLogDir })) {
     restore.push([k, process.env[k]])
     process.env[k] = v
   }
   chmodSync(FAKE_SHELL, 0o755)
   return {
     logFile,
+    kbLogDir,
     argv: () => JSON.parse(readFileSync(argvFile, 'utf8').trim().split('\n')[0]!) as string[],
     commands: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, any>),
@@ -275,6 +280,69 @@ test('ENOCRED during a hidden ceremony fails the presentation fast', async (t) =
   await until(() => run.commands().some((c) => c.cmd === 'webauthn-result'))
   assert.equal(notifications.length, 1)
   assert.match(notifications[0]!, /enroll/)
+})
+
+test('a shell that dies before ready fails the presentation fast and fatally', async (t) => {
+  // Launch failure used to be swallowed as a non-fatal presenter error while
+  // the engine silently polled doneUrl for the full timeout - the "hung with
+  // no prompt" shape. Nothing can ever answer a hidden ceremony without the
+  // shell, so this must be fatal.
+  const run = makeRun({ FAKE_DIE: '1' })
+  t.after(run.dispose)
+
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  await assert.rejects(
+    Promise.resolve(webkitPresenter(presenterOpts())({
+      authUrl: 'https://www.npmjs.com/auth/cli/uuid-10',
+      signal: abort.signal,
+    })),
+    (e: unknown) => e instanceof PublishError && e.code === 'ESHELL' && e.fatal === true &&
+      /could not start/.test(e.message),
+  )
+})
+
+test('a shell that exits mid-ceremony fails the presentation fatally', async (t) => {
+  // A crashed shell is otherwise invisible: every eval rejects and reads as
+  // 'pending' forever, so the drive loop would spin silently to the timeout.
+  const run = makeRun({ FAKE_EVALS: 'pending,pending', FAKE_EXIT_AFTER_EVALS: '2' })
+  t.after(run.dispose)
+
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  await assert.rejects(
+    Promise.resolve(webkitPresenter(presenterOpts())({
+      authUrl: 'https://www.npmjs.com/auth/cli/uuid-11',
+      signal: abort.signal,
+    })),
+    (e: unknown) => e instanceof PublishError && e.code === 'ESHELL' && e.fatal === true &&
+      /exited unexpectedly \(code 86\)/.test(e.message),
+  )
+})
+
+test('ceremony diagnostics land in the persistent log', async (t) => {
+  const run = makeRun({ FAKE_EVALS: 'clicked' })
+  t.after(run.dispose)
+
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  const presentation = webkitPresenter(presenterOpts())({
+    authUrl: 'https://www.npmjs.com/auth/cli/uuid-12',
+    signal: abort.signal,
+    purpose: 'publish',
+  })
+  await until(() => {
+    try { return run.commands().some((c) => c.cmd === 'eval') } catch { return false }
+  })
+  abort.abort()
+  await presentation
+
+  const [file] = readdirSync(run.kbLogDir)
+  assert.ok(file, 'a log file was created')
+  const events = readFileSync(join(run.kbLogDir, file!), 'utf8').trim().split('\n')
+    .map((l) => JSON.parse(l) as { event: string, purpose?: string })
+  assert.ok(events.some((e) => e.event === 'ceremony-start' && e.purpose === 'publish'))
+  assert.ok(events.some((e) => e.event === 'ceremony-end'))
 })
 
 test('the ceremony purpose + context become the Touch ID reason for the responder', async (t) => {

@@ -7,6 +7,10 @@ import { tmpdir } from 'node:os'
 import { publishWithWebAuth, PublishError, type StatusEvent } from '../src/engine.ts'
 import { startMockRegistry, OTP_TOKEN, SESSION_TOKEN } from './mock-registry.ts'
 
+// Keep the engine's persistent diagnostics (src/log.ts) out of the real
+// ~/.keybridge/logs while tests run.
+process.env.KEYBRIDGE_LOG_DIR = mkdtempSync(join(tmpdir(), 'keybridge-logs-'))
+
 const FIXTURE_TOKEN = 'fixture-session-token'
 
 function makeFixture (registryUrl: string) {
@@ -148,6 +152,31 @@ test('non-EOTP publish failures surface as PublishError without a ceremony', asy
     (e: unknown) => e instanceof PublishError
   )
   assert.equal(presenterCalled, false)
+})
+
+test('a non-fatal presenter failure is surfaced via onStatus while polling continues', async (t) => {
+  // The browser-fallback shape: the presenter dies but the human could still
+  // open authUrl themselves, so polling continues to the timeout - which must
+  // NOT be silent: the failure is reported as a status event immediately and
+  // folded into the timeout error.
+  const registry = await startMockRegistry({ completeAuthOnVisit: false })
+  t.after(() => registry.close())
+  const fixture = makeFixture(registry.url)
+  t.after(() => fixture.dispose())
+
+  const phases: string[] = []
+  await assert.rejects(
+    publishWithWebAuth({
+      cwd: fixture.dir,
+      npmArgs: ['--registry', registry.url, '--userconfig', fixture.npmrc],
+      pollTimeoutMs: 1500,
+      onStatus: ({ phase }: StatusEvent) => phases.push(phase),
+      presenter: async () => { throw new Error('browser failed to open') },
+    }),
+    (e: unknown) => e instanceof PublishError && e.code === 'ETIMEDOUT' &&
+      /presenter also failed: browser failed to open/.test(e.message),
+  )
+  assert.ok(phases.includes('presenter-failed'), 'presenter failure was reported as a status event')
 })
 
 test('a fatal presenter error aborts doneUrl polling immediately', async (t) => {

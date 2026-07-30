@@ -6,6 +6,7 @@ import { createAction, type Logger } from '@silkweave/core'
 import { z } from 'zod/v4'
 import { loginAs } from '../accounts.ts'
 import { PublishError, type StatusEvent } from '../engine.ts'
+import { currentLogFile, kblog } from '../log.ts'
 
 const input = z.object({
   registry: z.string().url()
@@ -34,6 +35,7 @@ export const NpmLoginAction = createAction({
   disposition: 'structured',
   annotations: { openWorldHint: true },
   run: async ({ registry }, context) => {
+    kblog('tool', { tool: 'npm-login', registry: registry ?? null })
     const logger = context.getOptional<Logger>('logger')
     let progress = 0
     const result = await loginAs(undefined, {
@@ -43,8 +45,12 @@ export const NpmLoginAction = createAction({
         logger?.progress({ progress: ++progress, message: phase === 'awaiting-human' ? `Waiting for WebAuthn verification at ${authUrl}` : phase })
       },
     }).catch((e: unknown) => {
-      // The tool result only carries the message - fold npm's stderr in.
-      if (e instanceof PublishError) e.message = e.fullMessage()
+      // The tool result only carries the message - fold npm's stderr in and
+      // point at the ceremony trace (MCP hosts drop this server's stderr).
+      kblog('tool-error', { tool: 'npm-login', code: (e as PublishError).code, error: (e as Error).message })
+      if (e instanceof PublishError) {
+        e.message = `${e.fullMessage()}\n(ceremony diagnostics: ${currentLogFile()})`
+      }
       throw e
     })
     return { user: result.user, registry: result.registry, npmrc: result.npmrc }

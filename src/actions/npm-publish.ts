@@ -14,6 +14,7 @@ import { resolve, sep } from 'node:path'
 import { z } from 'zod/v4'
 import { assertSecurityKeyFor, bindAccount, bindAfterLogin, resolveMediation, resolvePublishIdentity, whoami, type Mediation } from '../accounts.ts'
 import { packageId, publishWithWebAuth, resolveRegistry, PublishError, type StatusEvent } from '../engine.ts'
+import { currentLogFile, kblog } from '../log.ts'
 import { selectPresenter } from '../presenters/select.ts'
 
 const PROJECT_ROOT = process.cwd()
@@ -69,6 +70,10 @@ export const NpmPublishAction = createAction({
   disposition: 'structured',
   annotations: { destructiveHint: false, openWorldHint: true },
   run: async ({ cwd: cwdInput, tag, access, dryRun, user: expectedUser }, context) => {
+    kblog('tool', {
+      tool: 'npm-publish', root: PROJECT_ROOT,
+      cwd: cwdInput ?? null, tag: tag ?? null, dryRun: Boolean(dryRun), user: expectedUser ?? null,
+    })
     const cwd = resolve(PROJECT_ROOT, cwdInput ?? '.')
     if (cwd !== PROJECT_ROOT && !cwd.startsWith(PROJECT_ROOT + sep)) {
       throw new PublishError(`cwd escapes the project root: ${cwd}`, { code: 'ECWD' })
@@ -139,8 +144,12 @@ export const NpmPublishAction = createAction({
       },
     }).catch((e: unknown) => {
       // The tool result only carries the message - fold npm's stderr in so
-      // failures are diagnosable without hunting for server logs.
-      if (e instanceof PublishError) e.message = e.fullMessage()
+      // failures are diagnosable without hunting for server logs, and point
+      // at the ceremony trace (MCP hosts drop this server's stderr).
+      kblog('tool-error', { tool: 'npm-publish', code: (e as PublishError).code, error: (e as Error).message })
+      if (e instanceof PublishError) {
+        e.message = `${e.fullMessage()}\n(ceremony diagnostics: ${currentLogFile()})`
+      }
       throw e
     })
 
