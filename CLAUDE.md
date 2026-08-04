@@ -15,6 +15,13 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
 - `src/engine.ts` - npm publish/login orchestration (`mintWebAuthSession`,
   `pollDoneUrl`, `publishWithWebAuth`, `loginWithWebAuth`). Presenters can
   throw a `PublishError` with `fatal = true` to abort doneUrl polling early.
+  `spec` names what npm publishes (`npm publish <spec>`); `cwd` still decides
+  registry / token / package name.
+- `src/pm.ts` - the package-manager strategy: `detectPackageManager` (nearest
+  `packageManager` field → pnpm-workspace/lock → npm lockfiles → npm) and
+  `resolvePublishTarget`, which packs pnpm projects with `pnpm pack` and hands
+  the tarball back as the engine's `spec`. Callers own `cleanup()`. See the
+  pnpm gotcha below for why pnpm packs but never publishes.
 - `src/accounts.ts` - the identity layer. **`npm whoami` is the source of
   truth**; `~/.keybridge/accounts.json` maps npm usernames to per-account
   `WKWebsiteDataStore` UUIDs (browser profiles) + tracks the active account.
@@ -56,7 +63,7 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
 - `src/setup.ts` - `keybridge setup`: compiles both Swift helpers into
   `~/.keybridge/`, probes the Enclave, writes `config.json`.
 - `src/cli.ts` (`keybridge setup|status|enroll|login|switch|logout|open|
-  token|publish [--user]`), `src/server.ts` (MCP stdio), `src/actions/`
+  token|publish [--user] [--pm]`), `src/server.ts` (MCP stdio), `src/actions/`
   (`NpmPublish` + `NpmLogin` + `NpmStatus` + `NpmSwitchAccount`). Agent flow:
   NpmStatus → (NpmSwitchAccount) → NpmPublish `{ user }`.
 - `native/` - `WebShell.swift` (windowless WKWebView ceremony shell **plus the
@@ -179,6 +186,28 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   can't pass the first-login 2FA check with that key in the keybridge window -
   the user must pick npm's "use a recovery code" fallback (or temporarily
   remove the old key first). Documented in README's install section.
+- **pnpm packs, npm publishes** (`src/pm.ts`). pnpm workspaces write
+  `workspace:*` / `catalog:` deps that only a pnpm pack rewrites to real
+  versions - `npm publish` ships them verbatim and breaks consumers. But
+  `pnpm publish` cannot be driven either (measured 2026-08-04 vs pnpm 11.8.0
+  through `tests/mock-registry.ts`): spawned non-interactively it aborts with
+  `{"error":{"code":"ERR_PNPM_OTP_NON_INTERACTIVE"}}` the moment the registry
+  asks for an OTP, dropping the 401's authUrl/doneUrl, and `--otp=X`,
+  `--otp X` and `npm_config_otp` ALL fail to reach the request (its
+  `publishWithOtpHandling` does `{ ...publishOptions, otp }` with
+  `otp === undefined` on the first attempt, clobbering the CLI value; the
+  non-interactive guard then throws before the retry that would pass one). So
+  there is no OTP to hand pnpm even after a successful ceremony. Hence:
+  `pnpm pack --json --pack-destination <tmp>` → `npm publish <tarball>`, which
+  takes `--otp` fine and keeps the whole EOTP/mint/ceremony path untouched.
+  Corollaries: `pnpm pack` needs a completed `pnpm install` or it fails with
+  `ERR_PNPM_CANNOT_RESOLVE_WORKSPACE_PROTOCOL`; it runs `prepack` but NOT
+  `prepublishOnly`; it strips `packageManager` + publish lifecycle scripts
+  from the packed manifest (pnpm's manifest obfuscation - same as
+  `pnpm publish`); a missing `pnpm` is a hard `EPACKMGR` failure, never a
+  silent fallback to npm. Yarn is deliberately not detected. Trust the
+  destination-directory listing over `--json`'s `filename`: a `prepack` script
+  writing to stdout corrupts pnpm's JSON payload.
 - npm 11.9.0-11.14.x redact publish `authUrl`/`doneUrl` (`…/***`; fixed in
   11.15.0; pre-11.9 omits the URLs entirely) →
   `engine.mintWebAuthSession` recovers unredacted URLs via a metadata-only

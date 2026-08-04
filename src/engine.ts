@@ -418,6 +418,11 @@ export interface PublishOptions {
   /** package directory */
   cwd?: string
   npmBin?: string
+  /** What npm should publish: `npm publish <spec>`. Undefined publishes `cwd`,
+   * which is the normal case; pnpm projects pass a tarball packed by pnpm so
+   * workspace:/catalog: dependencies are already resolved (see src/pm.ts).
+   * `cwd` still decides the registry, the auth token and the package name. */
+  spec?: string
   /** gets the human to the WebAuthn ceremony; aborted via signal once done */
   presenter?: Presenter
   /** progress callback */
@@ -444,6 +449,7 @@ export async function publishWithWebAuth ({
   npmArgs = [],
   cwd = process.cwd(),
   npmBin = 'npm',
+  spec,
   presenter,
   onStatus = () => {},
   pollTimeoutMs = 300_000,
@@ -452,9 +458,10 @@ export async function publishWithWebAuth ({
   env,
 }: PublishOptions = {}): Promise<PublishOutcome> {
   if (!presenter) throw new TypeError('publishWithWebAuth requires a presenter')
+  const publishArgs = ['publish', ...(spec ? [spec] : []), '--json']
 
   onStatus({ phase: 'publish-attempt' })
-  const first = await runNpm(['publish', '--json', ...npmArgs], { cwd, npmBin, env })
+  const first = await runNpm([...publishArgs, ...npmArgs], { cwd, npmBin, env })
   if (first.code === 0) {
     return { published: true, usedWebAuth: false, result: first.json }
   }
@@ -467,8 +474,10 @@ export async function publishWithWebAuth ({
   if (autoLogin && (err?.code === 'ENEEDAUTH' || err?.code === 'E401')) {
     onStatus({ phase: 'login-required', code: err.code })
     await loginWithWebAuth({ cwd, npmBin, npmArgs, presenter, onStatus, pollTimeoutMs, afterLogin })
+    // `spec` rides along: the tarball is already packed, and re-packing would
+    // re-run `prepack` for nothing.
     return publishWithWebAuth({
-      npmArgs, cwd, npmBin, presenter, onStatus, pollTimeoutMs, autoLogin: false, env,
+      npmArgs, cwd, npmBin, spec, presenter, onStatus, pollTimeoutMs, autoLogin: false, env,
     })
   }
 
@@ -503,7 +512,7 @@ export async function publishWithWebAuth ({
   const otp = await presentAndPoll(presenter, authUrl, doneUrl, { authToken, timeoutMs: pollTimeoutMs, purpose: 'publish', onStatus })
 
   onStatus({ phase: 'publish-retry' })
-  const second = await runNpm(['publish', '--json', ...npmArgs, `--otp=${otp}`], { cwd, npmBin, env })
+  const second = await runNpm([...publishArgs, ...npmArgs, `--otp=${otp}`], { cwd, npmBin, env })
   if (second.code === 0) {
     return { published: true, usedWebAuth: true, result: second.json }
   }

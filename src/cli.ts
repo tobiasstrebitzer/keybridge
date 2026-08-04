@@ -9,10 +9,14 @@
 //   keybridge logout [--web]        # npm logout; --web also deletes the account's browser profile
 //   keybridge open [url]            # surfaced keybridge window on the current account's profile
 //   keybridge token <ls|set|rm> [username] [token]   # per-account token vault
-//   keybridge publish [--user <name>] [--] [npm publish args...]
+//   keybridge publish [--user <name>] [--pm auto|npm|pnpm] [--] [npm publish args...]
 //   keybridge logs [n]              # tail the persistent ceremony diagnostics (~/.keybridge/logs)
 //
 // login/switch/publish also accept [--poll-timeout <sec>] [--presenter webkit|browser].
+//
+// publish detects the project's package manager (--pm overrides): a pnpm
+// project is PACKED with pnpm - so workspace:/catalog: dependencies become
+// real versions - and the tarball is then published with npm (see src/pm.ts).
 //
 // Identity model: `npm whoami` drives every decision. Each npm account gets
 // its own WKWebsiteDataStore (browser profile), so switching accounts never
@@ -27,6 +31,7 @@ import {
 } from './accounts.ts'
 import { deleteToken, getToken, listTokenMeta, saveToken } from './tokens.ts'
 import { packageId, publishWithWebAuth, resolveRegistry, runNpm, PublishError, type StatusEvent } from './engine.ts'
+import { detectPackageManager, resolvePublishTarget, type PackageManagerChoice } from './pm.ts'
 import { defaultPresenterName, selectPresenter, type PresenterName } from './presenters/select.ts'
 import { openSurfacedShell, purgeWebStore } from './presenters/webkit.ts'
 import { latestLogFile } from './log.ts'
@@ -35,7 +40,7 @@ import { runSetup } from './setup.ts'
 import { join } from 'node:path'
 
 const USAGE = 'usage: keybridge <setup|status|enroll|login|switch|logout|open|token|publish|logs> ' +
-  '[--user <name>] [--poll-timeout <sec>] [--presenter webkit|browser] [--web] [--] [npm args...]'
+  '[--user <name>] [--pm auto|npm|pnpm] [--poll-timeout <sec>] [--presenter webkit|browser] [--web] [--] [npm args...]'
 
 const [, , command, ...rest] = process.argv
 
@@ -222,6 +227,7 @@ if (command === 'switch') {
 let pollTimeoutMs = 300_000
 let presenterChoice: PresenterName | undefined
 let expectUser: string | undefined
+let pmChoice: PackageManagerChoice | undefined
 const npmArgs: string[] = []
 // A NaN/zero timeout would make doneUrl polling wait forever (Date.now() >
 // NaN is always false) - reject bad values instead of hanging silently.
@@ -244,9 +250,13 @@ for (let i = 0; i < flags.length; i++) {
   else if (a.startsWith('--presenter=')) presenterChoice = a.split('=')[1] as PresenterName
   else if (a === '--user') expectUser = flags[++i]
   else if (a.startsWith('--user=')) expectUser = a.split('=')[1]
+  else if (a === '--pm') pmChoice = flags[++i] as PackageManagerChoice
+  else if (a.startsWith('--pm=')) pmChoice = a.split('=')[1] as PackageManagerChoice
   else if (a === '--') { npmArgs.push(...flags.slice(i + 1)); break }
   else npmArgs.push(a)
 }
+
+if (pmChoice && !['auto', 'npm', 'pnpm'].includes(pmChoice)) fail(`--pm expects auto|npm|pnpm (got "${pmChoice}")`)
 
 const presenterName = presenterChoice ?? defaultPresenterName()
 
@@ -333,25 +343,41 @@ try {
         ceremonyContext: { ...(pkg ? { pkg } : {}), ...(prefillUsername ? { user: prefillUsername } : {}) },
       },
     })
-    const outcome = await publishWithWebAuth({
-      npmArgs, presenter, pollTimeoutMs, onStatus,
-      // Mediated: never auto-login (it would mint a token for the WRONG
-      // account into npmrc); an expired mediation token fails fast instead.
-      ...(mediation ? { env: mediation.env, autoLogin: false } : {}),
-      afterLogin: async (login) => { await bindAfterLogin(storeId, { npmArgs }, login) },
+    // A pnpm project is packed by pnpm (workspace:/catalog: deps become real
+    // versions) and the tarball handed to npm; npm projects publish the
+    // directory as before. The tarball must survive the auto-login retry
+    // inside publishWithWebAuth, so it is only cleaned up at the very end.
+    const manager = pmChoice && pmChoice !== 'auto' ? pmChoice : detectPackageManager(process.cwd())
+    if (manager === 'pnpm') {
+      console.error('· pnpm project - packing with pnpm so workspace:/catalog: dependencies resolve to real versions')
+    }
+    const target = await resolvePublishTarget(process.cwd(), {
+      packageManager: manager, ...(mediation ? { env: mediation.env } : {}),
     })
-    // A mediated ceremony proved the profile belongs to that account - keep
-    // the binding (without stealing the active pointer).
-    if (mediation && outcome.usedWebAuth) bindAccount(mediation.user, storeId, { activate: false })
-    const id = outcome.result?.id ?? outcome.result?.name
-    if (!id) {
-      // npm exited 0 without a publish result (e.g. a forwarded flag made it
-      // print help) - do not claim success for a publish that never happened.
-      console.error('✗ npm exited without a publish result - nothing was published')
-      process.exitCode = 1
-    } else {
-      console.error(`✓ published ${id}${outcome.usedWebAuth ? ' (via WebAuthn hand-off)' : ''}`)
-      console.log(JSON.stringify(outcome.result, null, 2))
+    try {
+      const outcome = await publishWithWebAuth({
+        npmArgs, presenter, pollTimeoutMs, onStatus,
+        ...(target.spec ? { spec: target.spec } : {}),
+        // Mediated: never auto-login (it would mint a token for the WRONG
+        // account into npmrc); an expired mediation token fails fast instead.
+        ...(mediation ? { env: mediation.env, autoLogin: false } : {}),
+        afterLogin: async (login) => { await bindAfterLogin(storeId, { npmArgs }, login) },
+      })
+      // A mediated ceremony proved the profile belongs to that account - keep
+      // the binding (without stealing the active pointer).
+      if (mediation && outcome.usedWebAuth) bindAccount(mediation.user, storeId, { activate: false })
+      const id = outcome.result?.id ?? outcome.result?.name
+      if (!id) {
+        // npm exited 0 without a publish result (e.g. a forwarded flag made it
+        // print help) - do not claim success for a publish that never happened.
+        console.error('✗ npm exited without a publish result - nothing was published')
+        process.exitCode = 1
+      } else {
+        console.error(`✓ published ${id}${outcome.usedWebAuth ? ' (via WebAuthn hand-off)' : ''}`)
+        console.log(JSON.stringify(outcome.result, null, 2))
+      }
+    } finally {
+      target.cleanup()
     }
   }
 } catch (e) {

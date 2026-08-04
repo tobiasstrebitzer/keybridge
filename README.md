@@ -108,6 +108,11 @@ falls back to your default browser.
 - **Identity-aware** - `npm whoami` drives everything. Per-account browser
   profiles, instant account switching via a token vault, and publishes that
   can be pinned to (or mediated as) a specific account.
+- **pnpm workspaces, correctly** - a pnpm project is packed with `pnpm pack`
+  first, so `workspace:*` and `catalog:` dependencies land in the tarball as
+  real versions; npm then publishes that tarball. Publishing a workspace
+  package with plain `npm publish` would ship the protocol strings verbatim
+  and break every consumer.
 - **Agent-safe** - typed MCP tools with no flag injection, a hook that blocks
   raw `npm publish` in Bash, and fail-fast errors instead of silent hangs
   when something can't work.
@@ -121,12 +126,27 @@ keybridge publish --user tstrebitzer # this account, or fail fast / mediate
 keybridge login                      # just the web-login ceremony (~12 h session)
 keybridge status                     # who am I, which accounts/keys/tokens exist
 keybridge publish --presenter browser  # force the default-browser fallback
+keybridge publish --pm npm           # override the detected package manager
 keybridge logs                       # tail the persistent ceremony diagnostics
 ```
 
 Expired sessions are handled automatically: a publish that hits `E401` runs the
 web-login ceremony first (one extra touch), persists the token to your npmrc,
 then completes the publish.
+
+### pnpm workspaces
+
+keybridge detects the project's package manager (the `packageManager` field,
+then `pnpm-workspace.yaml` / lockfiles; `--pm` overrides it). In a pnpm
+project the tarball is built by `pnpm pack` - which resolves `workspace:*` and
+`catalog:` dependencies to real versions and runs `prepack`, exactly as
+`pnpm publish` would - and `npm publish <tarball>` then does the publishing,
+because npm is the half that speaks npm's web-auth (`EOTP`) protocol.
+Publishing such a package with plain `npm publish` would ship `workspace:*` to
+the registry; publishing it with `pnpm publish` cannot work at all, since pnpm
+(11.8.0) refuses to publish non-interactively the moment a one-time password
+is required, and its `--otp` never reaches the request. Run `pnpm install`
+first - `pnpm pack` cannot resolve `workspace:` without it.
 
 Publishing several packages in sequence needs only the first touch: the
 ceremony opts into npm's 5-minute cooldown, so follow-up publishes inside the
@@ -293,7 +313,8 @@ From a source checkout, `node src/cli.ts` works in place of the installed
 
 Layout: `src/engine.ts` (npm publish/login orchestration), `src/accounts.ts`
 (the identity layer: whoami-driven account/profile/credential bindings) +
-`src/tokens.ts` (per-account token vault), `src/presenters/webkit.ts` (drives
+`src/tokens.ts` (per-account token vault), `src/pm.ts` (package-manager
+detection + the pnpm pack strategy), `src/presenters/webkit.ts` (drives
 the shell) + `browser.ts` (fallback), `src/webauthn.ts` + `src/signer.ts` +
 `src/cbor.ts` (the authenticator), `src/setup.ts`, `src/cli.ts`,
 `src/server.ts` (MCP), `src/actions/` (silkweave tool definitions); `native/`

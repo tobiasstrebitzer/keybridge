@@ -33,6 +33,25 @@ bridge - never run `npm publish` directly in Bash (a hook will deny it).
    (`user` in the tool output) on success; on failure, relay the npm error
    summary.
 
+## Monorepos and pnpm workspaces
+
+keybridge detects the project's package manager per package. A pnpm project is
+packed with `pnpm pack` first - so `workspace:*` and `catalog:` dependencies
+become real versions - and npm publishes that tarball; the tool reports which
+packer ran as `packedWith`. Nothing to configure, but:
+
+- **`pnpm install` must have run**, or the pack fails with
+  `ERR_PNPM_CANNOT_RESOLVE_WORKSPACE_PROTOCOL`.
+- `packageManager: "npm"` forces the plain path. Only do that when the package
+  provably has no `workspace:`/`catalog:` dependencies - otherwise those
+  strings are published verbatim and every consumer breaks.
+- Publish **in dependency order** (leaf packages first), so each package's
+  deps already exist on the registry when it lands.
+- Only the first publish of a chain needs a touch: the ceremony opts into
+  npm's 5-minute cooldown, so the rest go through untouched while it lasts.
+  Keep going package by package rather than batching, and re-check
+  `usedWebAuth` in the output if you want to know whether a touch happened.
+
 ## Notes
 
 - The tool shows an approval card in Claude Code on every call - that is

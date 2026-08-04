@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { publishWithWebAuth, PublishError, type StatusEvent } from '../src/engine.ts'
+import { publishWithWebAuth, runNpm, PublishError, type StatusEvent } from '../src/engine.ts'
 import { startMockRegistry, OTP_TOKEN, SESSION_TOKEN } from './mock-registry.ts'
 
 // Keep the engine's persistent diagnostics (src/log.ts) out of the real
@@ -53,6 +53,37 @@ test('full publish loop: EOTP -> auth visit -> doneUrl token -> otp retry', asyn
   assert.equal(registry.state.authVisited, true)
   // doneUrl polling carried the registry auth token.
   assert.deepEqual([...registry.state.doneAuthHeaders], [`Bearer ${FIXTURE_TOKEN}`])
+})
+
+test('a pre-packed tarball is what gets published, ceremony and all', async (t) => {
+  // The pnpm-workspace path (src/pm.ts): the tarball is built by another
+  // packer, and npm is only handed the file. cwd still decides the registry,
+  // the auth token and the package name for the session mint.
+  const registry = await startMockRegistry()
+  t.after(() => registry.close())
+  const fixture = makeFixture(registry.url)
+  t.after(() => fixture.dispose())
+
+  const packDir = mkdtempSync(join(tmpdir(), 'keybridge-packed-'))
+  t.after(() => rmSync(packDir, { recursive: true, force: true }))
+  const packed = await runNpm(['pack', '--pack-destination', packDir], { cwd: fixture.dir })
+  assert.equal(packed.code, 0, packed.stderr)
+  const tarball = join(packDir, readdirSync(packDir).find((f) => f.endsWith('.tgz'))!)
+
+  const outcome = await publishWithWebAuth({
+    cwd: fixture.dir,
+    spec: tarball,
+    npmArgs: ['--registry', registry.url, '--userconfig', fixture.npmrc],
+    pollTimeoutMs: 30_000,
+    presenter: async ({ authUrl }) => { await fetch(authUrl) },
+  })
+
+  assert.equal(outcome.published, true)
+  assert.equal(outcome.result?.id, 'keybridge-e2e-fixture@1.0.0')
+  // Both attempts published the same tarball - the retry must not re-pack.
+  assert.equal(registry.state.puts.length, 2)
+  assert.equal(registry.state.puts[0]!.otp, null)
+  assert.equal(registry.state.puts[1]!.otp, OTP_TOKEN)
 })
 
 test('npm<12 redacted URLs: engine mints its own session and recovers', async (t) => {
