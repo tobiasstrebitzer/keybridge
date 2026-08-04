@@ -168,6 +168,14 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
     `NSWorkspace.frontmostApplication` answers that.
   - The view is **non-textual** (icon only), so the reason line we draw is the
     only thing naming what is being approved - not decoration.
+  - The auth slot holds a spinner whenever no `LAAuthenticationView` is
+    mounted, because the sheet is up for seconds before npm challenges and its
+    whole middle was otherwise blank. Rule: it spins only while KEYBRIDGE is
+    waiting (show → prompt mount, and again after an approval while the
+    signature/publish finish) - never over the prompt, where the human is the
+    one being waited on, and never after a failure, where nothing is in
+    flight. It is centered and intrinsically sized, so toggling it cannot
+    change `fittingSize` and jump the sheet.
   - Embedded policies are biometry/companion ONLY (no password fallback in
     view). `EEMBEDUNAVAIL`/`ENOKEY` fall back to the standalone signer; a
     `userCancel` deliberately does NOT (re-asking = a prompt nobody wanted).

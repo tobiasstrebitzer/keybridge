@@ -140,6 +140,12 @@ final class CeremonyHud: NSObject {
   private let statusLabel = NSTextField(labelWithString: "")
   private let authSlot = NSView()
   private var authView: LAAuthenticationView?
+  /// Fills the auth slot while keybridge is talking to npm. Without it the
+  /// sheet's whole middle is blank for the seconds before npm challenges -
+  /// the reason line says what will be approved, but nothing says the sheet is
+  /// alive. It occupies the SAME slot the fingerprint lands in, so the wait
+  /// and the prompt read as one surface rather than a jump.
+  private let spinner = NSProgressIndicator()
   /// Where the sheet rests when fully shown - the anchor both slide
   /// animations interpolate against.
   private var restingFrame = NSRect.zero
@@ -215,6 +221,17 @@ final class CeremonyHud: NSObject {
 
     authSlot.translatesAutoresizingMaskIntoConstraints = false
 
+    // .regular matches the LAAuthenticationView's control size, so the spinner
+    // and the fingerprint that replaces it sit at the same visual weight.
+    spinner.style = .spinning
+    spinner.controlSize = .regular
+    spinner.isIndeterminate = true
+    // Stopped means gone: the slot must be empty (not a frozen spinner) the
+    // moment the real prompt takes it over.
+    spinner.isDisplayedWhenStopped = false
+    spinner.translatesAutoresizingMaskIntoConstraints = false
+    authSlot.addSubview(spinner)
+
     let stack = NSStackView(views: [title, reasonLabel, authSlot, statusLabel])
     stack.orientation = .vertical
     stack.alignment = .centerX
@@ -254,6 +271,10 @@ final class CeremonyHud: NSObject {
       // just guarantees breathing room around it.
       authSlot.heightAnchor.constraint(greaterThanOrEqualToConstant: 96),
       authSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 96),
+      // Centered in the slot, and intrinsically sized - so showing or hiding
+      // it never changes the fitted height and the sheet cannot jump.
+      spinner.centerXAnchor.constraint(equalTo: authSlot.centerXAnchor),
+      spinner.centerYAnchor.constraint(equalTo: authSlot.centerYAnchor),
     ])
     // Cancel affordance: a quiet circular ✕ in the top-right. Sits OUTSIDE the
     // stack so it overlays the header without affecting the fitted height.
@@ -384,6 +405,10 @@ final class CeremonyHud: NSObject {
     statusLabel.stringValue = status
     let panel = self.panel ?? build()
     self.panel = panel
+    // Before the early-return below, so a chained ceremony's wait spins too.
+    // Never over the prompt: once the fingerprint is mounted the human is the
+    // one being waited on, and a spinner would claim otherwise.
+    if authView == nil { spinner.startAnimation(nil) }
 
     // Already up and staying up - just the text changed.
     if panel.isVisible && !slidingOut { return }
@@ -414,6 +439,9 @@ final class CeremonyHud: NSObject {
       return
     }
     slidingOut = true
+    // A sheet on its way out is not waiting for anything, and an off-screen
+    // panel should not keep an animation running.
+    spinner.stopAnimation(nil)
     let target = offscreenFrame(restingFrame == .zero ? restingFrameFor(panel) : restingFrame)
     NSAnimationContext.runAnimationGroup({ ctx in
       ctx.duration = slideDuration
@@ -517,6 +545,9 @@ final class CeremonyHud: NSObject {
     // what is being approved.
     let view = LAAuthenticationView(context: ctx, controlSize: .regular)
     view.translatesAutoresizingMaskIntoConstraints = false
+    // The slot changes hands here: we are done waiting on npm, the human is
+    // now the one being waited on.
+    spinner.stopAnimation(nil)
     authSlot.addSubview(view)
     NSLayoutConstraint.activate([
       view.centerXAnchor.constraint(equalTo: authSlot.centerXAnchor),
@@ -540,6 +571,11 @@ final class CeremonyHud: NSObject {
           ])
           return
         }
+        // Approved: the slot is empty again and the waiting is ours once more
+        // (the signature, then whatever npm does with it - and npm's login
+        // flow can chain a second ceremony onto the same sheet). Deliberately
+        // NOT in the failure path above: nothing is in flight there.
+        self.spinner.startAnimation(nil)
         do {
           let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: ctx)
           let signature = try key.signature(for: message) // no second prompt
