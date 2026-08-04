@@ -5,7 +5,8 @@ import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { ceremonyReason, shellIsFresh, unwrap, webkitPresenter, type WebkitPresenterOptions } from '../src/presenters/webkit.ts'
+import { ceremonyReason, shellIsFresh, shellSigner, unwrap, webkitPresenter, type WebkitPresenterOptions, type WebShell } from '../src/presenters/webkit.ts'
+import type { CredentialRecord, Signer } from '../src/signer.ts'
 import { STATUS_SCRIPT } from '../src/presenters/shared.ts'
 import { PublishError } from '../src/engine.ts'
 
@@ -228,6 +229,223 @@ test('keeps polling after a click so chained pages get their own click', async (
 
   const evals = run.commands().filter((c) => c.cmd === 'eval')
   assert.ok(evals.length >= 3, 'polling continued across the navigation')
+})
+
+test('a click that starts no ceremony is re-armed, at most a few times', async (t) => {
+  // The 2026-08-04 silent hang: the page reported 'clicked' but the click
+  // had landed before npm's handler attached, so no WebAuthn request ever
+  // followed - and the in-page one-shot flag blocked every retry. The
+  // presenter must notice the silence and re-arm the click, with a cap.
+  const run = makeRun({ FAKE_EVALS: Array(60).fill('clicked').join(',') })
+  t.after(run.dispose)
+
+  const logs: string[] = []
+  const abort = new AbortController()
+  t.after(() => abort.abort()) // a failed assertion must not leave the drive loop running
+  const presentation = webkitPresenter(presenterOpts({ reclickAfterMs: 20, log: (m) => logs.push(m) }))({
+    authUrl: 'https://www.npmjs.com/auth/cli/uuid-13',
+    signal: abort.signal,
+  })
+
+  const rearms = () => run.commands().filter((c) => c.cmd === 'eval' && /__keybridgeClicked = false/.test(c.js as string))
+  await until(() => {
+    try { return rearms().length >= 3 } catch { return false }
+  })
+  // Give the loop room to overshoot the cap before stopping it.
+  await new Promise((r) => setTimeout(r, 150))
+  abort.abort()
+  await presentation
+
+  assert.equal(rearms().length, 3, 're-armed exactly MAX_RECLICKS times, then gave up')
+  assert.ok(logs.some((m) => /re-clicking \(1\/3\)/.test(m)), 'each re-arm is announced')
+  assert.ok(logs.some((m) => /re-clicking \(3\/3\)/.test(m)))
+})
+
+test('a click whose ceremony arrived is never re-armed', async (t) => {
+  // A WebAuthn request on the same page means the click was live - re-arming
+  // then could stack a second Touch ID prompt on the human.
+  const run = makeRun({
+    FAKE_EVALS: Array(60).fill('clicked').join(','),
+    FAKE_WEBAUTHN: JSON.stringify({
+      op: 'get',
+      options: { challenge: { $b64: 'AQIDBA' } },
+      origin: 'https://www.npmjs.com',
+    }),
+  })
+  t.after(run.dispose)
+
+  const abort = new AbortController()
+  t.after(() => abort.abort()) // a failed assertion must not leave the drive loop running
+  const presentation = webkitPresenter(presenterOpts({
+    reclickAfterMs: 20,
+    webauthn: async () => ({ ok: true, credential: { id: 'fake-cred' } }),
+  }))({ authUrl: 'https://www.npmjs.com/auth/cli/uuid-14', signal: abort.signal })
+
+  await until(() => {
+    try { return run.commands().filter((c) => c.cmd === 'eval').length >= 20 } catch { return false }
+  })
+  abort.abort()
+  await presentation
+
+  const rearms = run.commands().filter((c) => c.cmd === 'eval' && /__keybridgeClicked = false/.test(c.js as string))
+  assert.equal(rearms.length, 0, 'a live click is left alone')
+})
+
+// --- embedded Touch ID (PRD §6.7): signing moves into the ceremony shell ---
+
+const SE_RECORD = {
+  credId: 'cred-1', rpId: 'www.npmjs.com', userHandle: null,
+  backend: 'secure-enclave', keyTag: 'bi.atomic.keybridge.cred-1', signCount: 1,
+} satisfies CredentialRecord
+
+/** A base signer that records whether the standalone helper path was used. */
+function baseSigner (): Signer & { signs: Array<{ reason: string }> } {
+  const signs: Array<{ reason: string }> = []
+  return {
+    signs,
+    backend: 'secure-enclave',
+    register: () => ({ credId: Buffer.from('x'), publicKey: { x: Buffer.alloc(32), y: Buffer.alloc(32) } }),
+    selectForAssertion: () => ({ record: SE_RECORD, signCount: 1 }),
+    async sign (_record, _message, reason) {
+      signs.push({ reason })
+      return Buffer.from('system-sheet-signature')
+    },
+  }
+}
+
+function stubShell (sign: (tag: string, message: Buffer, reason: string) => Promise<Buffer>): WebShell {
+  return { sign } as unknown as WebShell
+}
+
+test('routes Secure Enclave signing through the live shell, with a display-ready label', async () => {
+  const base = baseSigner()
+  const calls: Array<{ tag: string, reason: string }> = []
+  const signer = shellSigner(base, () => stubShell(async (tag, _message, reason) => {
+    calls.push({ tag, reason })
+    return Buffer.from('embedded-signature')
+  }))
+
+  const sig = await signer.sign(SE_RECORD, Buffer.from('payload'), 'publish keybridge@0.7.0 to npm as tstrebitzer')
+
+  assert.equal(sig.toString(), 'embedded-signature')
+  assert.equal(base.signs.length, 0, 'the standalone Touch ID helper was never invoked')
+  assert.equal(calls[0]!.tag, SE_RECORD.keyTag)
+  // The HUD renders this as its own sentence, not as “…is trying to <reason>”.
+  assert.equal(calls[0]!.reason, 'Publish keybridge@0.7.0 to npm as tstrebitzer')
+})
+
+test('falls back to the system sheet when the embedded prompt cannot run', async () => {
+  // biometry not enrolled / Touch ID unavailable: the HUD must degrade, never
+  // block (PRD §6.6).
+  const base = baseSigner()
+  const signer = shellSigner(base, () => stubShell(async () => {
+    const err = new Error('cannot evaluate biometrics') as Error & { code?: string }
+    err.code = 'EEMBEDUNAVAIL'
+    throw err
+  }))
+
+  const sig = await signer.sign(SE_RECORD, Buffer.from('payload'), 'publish x@1 to npm')
+
+  assert.equal(sig.toString(), 'system-sheet-signature')
+  assert.equal(base.signs.length, 1, 'the standalone helper took over')
+})
+
+test('a cancelled Touch ID is NOT retried through the system sheet', async () => {
+  // userCancel is the human saying no - re-asking via a second prompt would be
+  // a prompt they never asked for.
+  const base = baseSigner()
+  const signer = shellSigner(base, () => stubShell(async () => {
+    const err = new Error('Touch ID / user presence check failed: userCancel') as Error & { code?: string }
+    err.code = 'userCancel'
+    throw err
+  }))
+
+  await assert.rejects(
+    () => signer.sign(SE_RECORD, Buffer.from('payload'), 'publish x@1 to npm'),
+    /userCancel/)
+  assert.equal(base.signs.length, 0, 'no second prompt after a deliberate cancel')
+})
+
+test('software credentials never go near the shell', async () => {
+  const base = baseSigner()
+  let shellUsed = false
+  const signer = shellSigner(base, () => stubShell(async () => { shellUsed = true; return Buffer.alloc(0) }))
+
+  await signer.sign({ ...SE_RECORD, backend: 'software' }, Buffer.from('p'), 'authenticate to www.npmjs.com')
+
+  assert.equal(shellUsed, false)
+  assert.equal(base.signs.length, 1)
+})
+
+test('shows the ceremony HUD for the whole flow and closes it at teardown', async (t) => {
+  const run = makeRun({ FAKE_EVALS: 'pending,clicked' })
+  t.after(run.dispose)
+
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  const presentation = webkitPresenter(presenterOpts({
+    ceremonyContext: { pkg: 'keybridge@0.7.0', user: 'tstrebitzer' },
+  }))({ authUrl: 'https://www.npmjs.com/auth/cli/uuid-15', signal: abort.signal, purpose: 'publish' })
+
+  // Wait for the click to be seen, not just for the panel: the status update
+  // it triggers is what this test is about.
+  await until(() => {
+    try { return run.commands().some((c) => c.cmd === 'hud-status') } catch { return false }
+  })
+  abort.abort()
+  await presentation
+  await until(() => run.commands().some((c) => c.cmd === 'hud-close'))
+
+  const cmds = run.commands()
+  const show = cmds.find((c) => c.cmd === 'hud-show')!
+  // The embedded view is icon-only, so this line is the only thing naming what
+  // is being approved - it must carry the package and the account.
+  assert.equal(show.reason, 'Publish keybridge@0.7.0 to npm as tstrebitzer')
+  assert.ok(cmds.some((c) => c.cmd === 'hud-status' && /security key/.test(c.status as string)),
+    'the click advances the HUD status')
+})
+
+test('the HUD close button aborts the ceremony fatally, not silently', async (t) => {
+  // The ✕ is meant to behave like ctrl-C. Without a FATAL error the engine
+  // would keep polling doneUrl for five minutes after the human gave up.
+  const run = makeRun({ FAKE_EVALS: 'pending,pending,clicked', FAKE_DISMISS_AFTER_EVALS: '2' })
+  t.after(run.dispose)
+
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  await assert.rejects(
+    Promise.resolve(webkitPresenter(presenterOpts())({
+      authUrl: 'https://www.npmjs.com/auth/cli/uuid-17',
+      signal: abort.signal,
+      purpose: 'publish',
+    })),
+    (e: unknown) => e instanceof PublishError && e.code === 'ECANCEL' && e.fatal === true &&
+      /cancelled from the sheet/.test(e.message),
+  )
+})
+
+test('KEYBRIDGE_HUD=0 restores the invisible flow (no panel, no in-shell signing)', async (t) => {
+  const run = makeRun({ FAKE_EVALS: 'pending,clicked', KEYBRIDGE_HUD: '0' })
+  t.after(run.dispose)
+
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  const presentation = webkitPresenter(presenterOpts())({
+    authUrl: 'https://www.npmjs.com/auth/cli/uuid-16',
+    signal: abort.signal,
+    purpose: 'publish',
+  })
+
+  await until(() => {
+    try { return run.commands().filter((c) => c.cmd === 'eval').length >= 2 } catch { return false }
+  })
+  abort.abort()
+  await presentation
+  await until(() => run.commands().some((c) => c.cmd === 'close'))
+
+  const cmds = run.commands()
+  assert.equal(cmds.filter((c) => String(c.cmd).startsWith('hud-')).length, 0, 'no HUD commands at all')
+  assert.equal(cmds.filter((c) => c.cmd === 'sign').length, 0, 'signing stays with the standalone helper')
 })
 
 test('runs the shell with the account store id', async (t) => {

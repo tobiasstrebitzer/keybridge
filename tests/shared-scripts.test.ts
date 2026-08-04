@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
-import { CAPTURE_SCRIPT, STATUS_SCRIPT } from '../src/presenters/shared.ts'
+import { CAPTURE_SCRIPT, REARM_SCRIPT, STATUS_SCRIPT } from '../src/presenters/shared.ts'
 
 interface StubCheckbox {
   checked: boolean
@@ -61,6 +61,22 @@ test('clicks the security key button exactly once per page', () => {
   assert.equal(runStatus(page), 'clicked')
   assert.equal(runStatus(page), 'clicked')
   assert.equal(key.clicks, 1, 'window flag stops the second click')
+})
+
+test('REARM_SCRIPT re-enables the one-shot click and remember flags', () => {
+  // The presenter sends this when a click provably started no ceremony (the
+  // click landed before npm attached its handler); the next status poll must
+  // click - and tick - again.
+  const box = checkbox('Remember this device')
+  const key = button('Use security key')
+  const page = makePage({ checkboxes: [box], buttons: [key] })
+  assert.equal(runStatus(page), 'clicked+remember')
+  assert.equal(runStatus(page), 'clicked')
+  assert.equal(key.clicks, 1)
+  assert.equal(vm.runInContext(REARM_SCRIPT, page), 'rearmed')
+  assert.equal(runStatus(page), 'clicked+remember', 'flags reset - full first-tick behavior again')
+  assert.equal(key.clicks, 2, 'the button got its second click')
+  assert.equal(box.clicks, 1, 'already-checked box is not toggled back off')
 })
 
 test('ticks the remember-for-5-minutes checkbox before clicking, reports +remember once', () => {

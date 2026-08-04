@@ -57,6 +57,18 @@ export const STATUS_SCRIPT = `(() => {
   } catch (e) { return 'pending' }
 })()`
 
+// Clears the page-side one-shot flags so the NEXT status poll ticks the
+// checkbox and clicks the button again. Used by the presenter when a click
+// provably produced no WebAuthn request: npm renders the "Use security key"
+// button before React attaches its handler, and a click landing in that gap
+// does nothing - while the one-shot flag blocks every retry (the silent
+// "no Touch ID, no error" hang of 2026-08-04).
+export const REARM_SCRIPT = `(() => {
+  window.__keybridgeClicked = false
+  window.__keybridgeRemembered = false
+  return 'rearmed'
+})()`
+
 // Debug instrumentation (KEYBRIDGE_CAPTURE_DOM): a full snapshot of the
 // current page, JSON-stringified so it survives the eval channel. The
 // presenter diffs consecutive snapshots and writes the changed ones to disk -

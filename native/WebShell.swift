@@ -16,6 +16,10 @@
 //     {"cmd":"surface"}                            // show a real window
 //     {"cmd":"hide"}                               // hide it again
 //     {"cmd":"webauthn-result","id":3,"resp":{...}} // answer a webauthn event
+//     {"cmd":"hud-show","reason":"...","status":"..."}  // ceremony HUD
+//     {"cmd":"hud-status","status":"..."}
+//     {"cmd":"hud-close"}
+//     {"cmd":"sign","id":4,"tag":"..","message":"<b64>","reason":".."}
 //     {"cmd":"close"}
 //   shell -> parent
 //     {"event":"ready"}
@@ -23,6 +27,14 @@
 //     {"event":"nav-error","error":"..."}
 //     {"event":"eval-result","id":1,"value":...}   // or {"id":1,"error":"..."}
 //     {"event":"webauthn","id":3,"op":"get","options":{...},"origin":"..."}
+//     {"event":"sign-result","id":4,"signature":"<b64 DER>"}
+//                                  // or {"id":4,"error":"..","code":"<LAError>"}
+//
+// The HUD (ceremony panel) hosts the Touch ID prompt IN THIS WINDOW via
+// LAAuthenticationView, and `sign` does the Secure Enclave signature here so
+// the very same LAContext satisfies the key's .userPresence gate - one touch,
+// no system sheet, no frontmost-process lottery. See _docs/PRD-ceremony-hud.md
+// §6.7 for the measurements behind this design.
 //
 // The injected user script (--inject, required) runs at documentStart in the
 // page content world and overrides navigator.credentials; its transport is
@@ -34,6 +46,9 @@
 //                      [--store-id <uuid> | --ephemeral] [--ua <string>]
 //                      [--appearance dark|light]   (default: follow the system)
 import AppKit
+import CryptoKit
+import LocalAuthentication
+import LocalAuthenticationEmbeddedUI
 import WebKit
 
 let cliArgs = CommandLine.arguments
@@ -94,9 +109,479 @@ guard let injectPath = argValue("--inject"),
   exit(2)
 }
 
+// MARK: - Ceremony HUD
+//
+// A bottom-center non-activating panel that hosts the Touch ID prompt inside
+// our own window (LAAuthenticationView) instead of relying on the system
+// sheet. Same window family as `Shell.surface()` below, and deliberately so:
+// it appears over whatever the user is doing without taking their focus.
+/// A borderless panel that can still take KEY status.
+///
+/// `.borderless` windows return false from `canBecomeKey` by default, and that
+/// would be fatal here: LocalAuthentication refuses to run the biometric
+/// mechanism until our window becomes key (see `focusForPrompt`). The sheet
+/// look therefore requires this override, not just a style mask.
+final class HudPanel: NSPanel {
+  override var canBecomeKey: Bool { true }
+  override var canBecomeMain: Bool { false }
+}
+
+final class CeremonyHud: NSObject {
+  private var panel: NSPanel?
+  /// The context driving the prompt on screen right now - kept so the ✕ can
+  /// invalidate it and end the ceremony instead of orphaning it.
+  private var activeContext: LAContext?
+  /// How many times we have clawed key status back during this prompt.
+  private var refocusAttempts = 0
+  /// Enough to win against an app that briefly steals focus, low enough that
+  /// we stop fighting a user who genuinely wants to be elsewhere.
+  private static let maxRefocus = 8
+  private let reasonLabel = NSTextField(wrappingLabelWithString: "")
+  private let statusLabel = NSTextField(labelWithString: "")
+  private let authSlot = NSView()
+  private var authView: LAAuthenticationView?
+  /// Where the sheet rests when fully shown - the anchor both slide
+  /// animations interpolate against.
+  private var restingFrame = NSRect.zero
+  private var slidingOut = false
+
+  private let sheetWidth: CGFloat = 418
+  /// A floor, not the height: the sheet grows to fit its content, so a long
+  /// package name wrapping the reason line onto a second row pushes the sheet
+  /// taller instead of pushing the status text off the bottom.
+  private let minSheetHeight: CGFloat = 224
+  private let cornerRadius: CGFloat = 16
+  private let slideDuration = 0.30
+  /// How far the window extends BELOW the screen edge. The window's shadow
+  /// wraps all four sides, so a window whose bottom sits exactly on the screen
+  /// edge draws a visible bottom border and dims radially into the bottom-left
+  /// and bottom-right corners. Pushing the bottom edge off-screen moves that
+  /// whole side out of view, leaving only the left/right/top shadow that makes
+  /// the sheet read as raised.
+  private let bleed: CGFloat = 28
+
+  /// True while a Touch ID prompt is waiting on the human.
+  private var promptActive = false
+  /// The status to restore once focus comes back (see the focus observers).
+  private var promptStatus = ""
+  private var focusObservers: [NSObjectProtocol] = []
+  private var content: NSVisualEffectView?
+
+  private var keyDir: URL {
+    FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".keybridge/se-keys", isDirectory: true)
+  }
+
+  private func build() -> NSPanel {
+    // Borderless + transparent so the rounded TOP corners we draw ourselves
+    // are the only chrome: a titled window would impose the system's own
+    // all-four-corners rounding and a bottom edge we don't want.
+    let panel = HudPanel(contentRect: NSRect(x: 0, y: 0, width: sheetWidth, height: minSheetHeight + bleed),
+                         styleMask: [.borderless, .nonactivatingPanel],
+                         backing: .buffered, defer: false)
+    panel.isOpaque = false
+    panel.backgroundColor = .clear
+    panel.hasShadow = true
+    // A sheet is anchored to the screen edge; letting it be dragged away from
+    // that edge would just break the illusion.
+    panel.isMovableByWindowBackground = false
+    panel.isReleasedWhenClosed = false
+    panel.isFloatingPanel = true
+    panel.becomesKeyOnlyIfNeeded = false
+    // Never vanish when another app takes over, sit above ordinary floating
+    // windows, and follow the user to whatever Space they switch to: the
+    // ceremony is modal in intent, so it should not be possible to lose it
+    // behind something.
+    panel.hidesOnDeactivate = false
+    panel.level = .modalPanel
+    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+    let title = NSTextField(labelWithString: "keybridge")
+    title.font = .systemFont(ofSize: 11, weight: .semibold)
+    title.textColor = .secondaryLabelColor
+
+    // LAAuthenticationView is NON-TEXTUAL (a compact icon; Apple's header:
+    // "The reason for the authentication must be apparent from the
+    // surrounding UI"). This label is therefore the ONLY thing telling the
+    // human what they are approving - it is load-bearing, not decoration.
+    reasonLabel.font = .systemFont(ofSize: 13, weight: .medium)
+    reasonLabel.alignment = .center
+    // Deterministic wrapping, so the fitting-size measurement below knows how
+    // many lines this label really needs.
+    reasonLabel.preferredMaxLayoutWidth = sheetWidth - 40
+
+    statusLabel.font = .systemFont(ofSize: 11)
+    statusLabel.textColor = .secondaryLabelColor
+    statusLabel.alignment = .center
+
+    authSlot.translatesAutoresizingMaskIntoConstraints = false
+
+    let stack = NSStackView(views: [title, reasonLabel, authSlot, statusLabel])
+    stack.orientation = .vertical
+    stack.alignment = .centerX
+    stack.spacing = 18
+    stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+
+    // NSVisualEffectView rather than a plain layer colour: it tracks the
+    // light/dark appearance on its own, so the sheet follows the system theme
+    // like the rest of the shell's chrome.
+    let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: sheetWidth, height: minSheetHeight + bleed))
+    content.material = .windowBackground
+    content.blendingMode = .behindWindow
+    content.state = .active
+    content.wantsLayer = true
+    // Top corners only. On macOS layer geometry MaxY is the TOP edge, so these
+    // two are top-left and top-right; the bottom stays square and flush with
+    // the screen edge, which is what makes it read as a sheet rather than a
+    // floating dialog.
+    content.layer?.cornerRadius = cornerRadius
+    content.layer?.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+    content.layer?.masksToBounds = true
+
+    content.addSubview(stack)
+    NSLayoutConstraint.activate([
+      // Fixed width makes the wrapping label's height well-defined, which is
+      // what `fittingSize` needs to measure the sheet.
+      content.widthAnchor.constraint(equalToConstant: sheetWidth),
+      stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+      stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+      stack.topAnchor.constraint(equalTo: content.topAnchor),
+      // EQUAL, not <=: the stack now DRIVES the content height, reserving the
+      // off-screen bleed below it. With <= the content could exceed the window
+      // and the status line fell off the bottom.
+      stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -bleed),
+      // Minimums, not sizes - the auth view keeps its intrinsic size and this
+      // just guarantees breathing room around it.
+      authSlot.heightAnchor.constraint(greaterThanOrEqualToConstant: 96),
+      authSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 96),
+    ])
+    // Cancel affordance: a quiet circular ✕ in the top-right. Sits OUTSIDE the
+    // stack so it overlays the header without affecting the fitted height.
+    let close = NSButton()
+    close.isBordered = false
+    close.bezelStyle = .shadowlessSquare
+    close.title = ""
+    close.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel")?
+      .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .regular))
+    close.imagePosition = .imageOnly
+    close.contentTintColor = .tertiaryLabelColor
+    close.toolTip = "Cancel this ceremony"
+    close.target = self
+    close.action = #selector(dismissClicked)
+    close.translatesAutoresizingMaskIntoConstraints = false
+    content.addSubview(close)
+    NSLayoutConstraint.activate([
+      close.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+      close.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+    ])
+
+    panel.contentView = content
+    self.content = content
+    observeFocus(panel)
+    return panel
+  }
+
+  /// The ✕. Ends the whole ceremony rather than just hiding the sheet:
+  /// invalidating the context makes `evaluatePolicy` complete (as appCancel),
+  /// and `hud-dismissed` tells the parent to abort its doneUrl polling instead
+  /// of waiting out the five-minute timeout.
+  @objc private func dismissClicked() {
+    cancelPrompt(reason: "user")
+  }
+
+  private func cancelPrompt(reason: String) {
+    if promptActive, let ctx = activeContext {
+      promptActive = false
+      ctx.invalidate() // -> evaluatePolicy completion fires with appCancel
+    }
+    activeContext = nil
+    writeLine(["event": "hud-dismissed", "reason": reason])
+    close()
+  }
+
+  /// Window height for the CURRENT content: whatever the stack needs, plus the
+  /// off-screen bleed, never below the floor. Recomputed whenever the content
+  /// changes (text set, auth view mounted or torn down).
+  private func fittedHeight() -> CGFloat {
+    guard let content else { return minSheetHeight + bleed }
+    content.layoutSubtreeIfNeeded()
+    return max(content.fittingSize.height, minSheetHeight + bleed)
+  }
+
+  /// Re-fit an already-visible sheet, keeping its bottom pinned below the
+  /// screen edge so it grows upward rather than sliding.
+  private func refit() {
+    guard let panel, panel.isVisible, !slidingOut else { return }
+    restingFrame = restingFrameFor(panel)
+    panel.setFrame(restingFrame, display: true)
+  }
+
+  /// Losing key status mid-prompt is not cosmetic: LocalAuthentication PAUSES
+  /// the biometric mechanism the moment the app stops being active, and only
+  /// resumes on NSWindowDidBecomeKeyNotification (PRD §6.7 finding 3). The
+  /// sensor then does nothing and the human has no idea why - the exact
+  /// silent-hang shape keybridge keeps having to design out. So watch for it
+  /// and say plainly what to do: click the sheet.
+  ///
+  /// While a prompt is up we CLAW KEY STATUS BACK rather than just asking: a
+  /// half-finished ceremony that silently stops responding is worse than a
+  /// sheet that insists. Capped at `maxRefocus` so we never ping-pong forever
+  /// with an app that wants focus more than we do - past the cap we stop
+  /// fighting and fall back to telling the human to click.
+  private func observeFocus(_ panel: NSPanel) {
+    let nc = NotificationCenter.default
+    focusObservers.append(nc.addObserver(forName: NSWindow.didResignKeyNotification,
+                                         object: panel, queue: .main) { [weak self] _ in
+      guard let self, self.promptActive else { return }
+      let willRegrab = self.refocusAttempts < Self.maxRefocus
+      writeLine(["event": "hud-focus", "key": false, "regrab": willRegrab])
+      guard willRegrab else {
+        self.statusLabel.textColor = .systemOrange
+        self.statusLabel.stringValue = "paused - click this sheet, then use Touch ID"
+        return
+      }
+      self.refocusAttempts += 1
+      // Next runloop turn: makeKey inside the resign notification itself is
+      // swallowed while AppKit is still settling the focus change.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        guard let self, self.promptActive else { return }
+        self.panel?.orderFrontRegardless()
+        self.panel?.makeKeyAndOrderFront(nil)
+      }
+    })
+    focusObservers.append(nc.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                                         object: panel, queue: .main) { [weak self] _ in
+      guard let self, self.promptActive else { return }
+      self.statusLabel.textColor = .secondaryLabelColor
+      self.statusLabel.stringValue = self.promptStatus
+      writeLine(["event": "hud-focus", "key": true])
+    })
+  }
+
+  /// Bottom-center, flush with the ABSOLUTE bottom of the screen - `frame`,
+  /// not `visibleFrame`, so the sheet meets the screen edge instead of
+  /// floating above the Dock. The window is `bleed` points TALLER than the
+  /// sheet and hangs that much below the screen, so its bottom edge (and the
+  /// shadow around it) is never on screen; content is top-anchored, so the
+  /// visible height is still exactly `sheetHeight`.
+  private func restingFrameFor(_ panel: NSPanel) -> NSRect {
+    let h = fittedHeight()
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+      return NSRect(x: 0, y: 0, width: sheetWidth, height: h)
+    }
+    let f = screen.frame
+    return NSRect(x: f.midX - sheetWidth / 2, y: f.minY - bleed, width: sheetWidth, height: h)
+  }
+
+  /// Fully off-screen below the bottom edge - where a slide starts and ends.
+  private func offscreenFrame(_ resting: NSRect) -> NSRect {
+    NSRect(x: resting.minX, y: resting.minY - resting.height,
+           width: resting.width, height: resting.height)
+  }
+
+  func show(reason: String, status: String) {
+    reasonLabel.stringValue = reason
+    statusLabel.stringValue = status
+    let panel = self.panel ?? build()
+    self.panel = panel
+
+    // Already up and staying up - just the text changed.
+    if panel.isVisible && !slidingOut { return }
+
+    restingFrame = restingFrameFor(panel)
+    // A show landing mid-dismissal reverses the slide from wherever it is,
+    // rather than snapping the sheet off-screen first.
+    if !slidingOut {
+      panel.setFrame(offscreenFrame(restingFrame), display: false)
+      panel.alphaValue = 0
+    }
+    slidingOut = false
+    panel.orderFrontRegardless()
+    NSAnimationContext.runAnimationGroup { ctx in
+      ctx.duration = slideDuration
+      ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+      panel.animator().alphaValue = 1
+      panel.animator().setFrame(restingFrame, display: true)
+    }
+    writeLine(["event": "hud", "visible": true])
+  }
+
+  /// Slide back down through the bottom edge, then order out. `then` runs
+  /// after the sheet is actually gone.
+  private func slideOut(then: (() -> Void)? = nil) {
+    guard let panel, panel.isVisible, !slidingOut else {
+      then?()
+      return
+    }
+    slidingOut = true
+    let target = offscreenFrame(restingFrame == .zero ? restingFrameFor(panel) : restingFrame)
+    NSAnimationContext.runAnimationGroup({ ctx in
+      ctx.duration = slideDuration
+      ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+      panel.animator().alphaValue = 0
+      panel.animator().setFrame(target, display: true)
+    }, completionHandler: { [weak self] in
+      // A show() that arrived mid-slide already claimed the sheet - leave it.
+      guard let self, self.slidingOut else { then?(); return }
+      self.slidingOut = false
+      panel.orderOut(nil)
+      then?()
+    })
+  }
+
+  /// Take KEY window status - called only when a prompt is about to run, never
+  /// merely to show progress, so we hold the user's keyboard focus for the
+  /// seconds of the ceremony rather than the minutes of the whole flow.
+  ///
+  /// This is NOT redundant with orderFrontRegardless(). On a
+  /// `.nonactivatingPanel`, becoming key takes keyboard focus WITHOUT
+  /// activating keybridge (the user's app stays frontmost), and
+  /// LocalAuthentication REFUSES to run the biometric mechanism until it sees
+  /// NSWindowDidBecomeKeyNotification - it logs "LAAuthenticationView is not
+  /// visible to user because NSApplication is not active" and pauses. Drop
+  /// this and the Touch ID prompt silently waits for the human to click the
+  /// panel first (measured 2026-08-04: 5804ms with a click, 2487ms with this
+  /// line). Do not "simplify" it away.
+  private func focusForPrompt() {
+    panel?.makeKeyAndOrderFront(nil)
+  }
+
+  func status(_ text: String) {
+    statusLabel.stringValue = text
+    refit()
+  }
+
+  func hide() {
+    slideOut()
+  }
+
+  func close() {
+    clearAuthView()
+    slideOut()
+  }
+
+  private func clearAuthView() {
+    authView?.removeFromSuperview()
+    authView = nil
+  }
+
+  /// Touch ID inside our panel, then the Secure Enclave signature on the SAME
+  /// LAContext - so the key's .userPresence gate is already satisfied and the
+  /// signature costs no second prompt (measured: ~180ms).
+  func sign(id: Int, tag: String, message: Data, reason: String) {
+    let safeTag = tag.replacingOccurrences(of: "/", with: "_")
+    guard let blob = try? Data(contentsOf: keyDir.appendingPathComponent("\(safeTag).key")) else {
+      writeLine(["event": "sign-result", "id": id, "error": "credential blob not found for tag \(tag)", "code": "ENOKEY"])
+      return
+    }
+
+    promptStatus = "waiting for Touch ID approval…"
+    statusLabel.textColor = .secondaryLabelColor
+    show(reason: reason, status: promptStatus)
+    // Arm the focus watch before taking focus, so a key status we lose
+    // immediately is still reported.
+    promptActive = true
+    refocusAttempts = 0
+    focusForPrompt() // must happen BEFORE evaluatePolicy - see focusForPrompt()
+
+    let ctx = LAContext()
+    activeContext = ctx
+    // The embedded view cannot host a password sheet, so do not offer a
+    // fallback affordance it is unable to honor.
+    ctx.localizedFallbackTitle = ""
+
+    // Biometry/companion only: per Apple's header the embedded view supports
+    // just these policies, and .deviceOwnerAuthentication would fail anyway
+    // when neither is available. If we cannot evaluate, say so precisely and
+    // let the parent fall back to the system-sheet signer.
+    let policy: LAPolicy = .deviceOwnerAuthenticationWithBiometricsOrCompanion
+    var canError: NSError?
+    guard ctx.canEvaluatePolicy(policy, error: &canError) else {
+      promptActive = false
+      status("Touch ID unavailable")
+      writeLine([
+        "event": "sign-result", "id": id,
+        "error": "cannot evaluate biometrics/companion: \(canError?.localizedDescription ?? "unavailable")",
+        "code": "EEMBEDUNAVAIL",
+      ])
+      return
+    }
+
+    // A fresh view per ceremony: LAAuthenticationView is permanently paired
+    // with the LAContext given to its initializer, and an LAContext is
+    // single-use. Only the slot is rebuilt - the panel itself persists, so
+    // the human sees one continuous sheet across chained ceremonies.
+    clearAuthView()
+    // .regular rather than .large: at .large the fingerprint dominated the
+    // sheet and crowded the reason line, which is the part that actually says
+    // what is being approved.
+    let view = LAAuthenticationView(context: ctx, controlSize: .regular)
+    view.translatesAutoresizingMaskIntoConstraints = false
+    authSlot.addSubview(view)
+    NSLayoutConstraint.activate([
+      view.centerXAnchor.constraint(equalTo: authSlot.centerXAnchor),
+      view.centerYAnchor.constraint(equalTo: authSlot.centerYAnchor),
+    ])
+    refit() // the glyph may be taller than the slot's minimum
+    panel?.displayIfNeeded()
+
+    ctx.evaluatePolicy(policy, localizedReason: reason) { ok, laError in
+      DispatchQueue.main.async {
+        self.promptActive = false
+        self.activeContext = nil
+        self.statusLabel.textColor = .secondaryLabelColor
+        self.clearAuthView()
+        guard ok else {
+          let name = laErrorName(laError)
+          self.status("not approved (\(name))")
+          writeLine([
+            "event": "sign-result", "id": id,
+            "error": "Touch ID / user presence check failed: \(name)", "code": name,
+          ])
+          return
+        }
+        do {
+          let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: ctx)
+          let signature = try key.signature(for: message) // no second prompt
+          self.status("approved")
+          writeLine([
+            "event": "sign-result", "id": id,
+            "signature": signature.derRepresentation.base64EncodedString(),
+          ])
+        } catch {
+          self.status("signing failed")
+          writeLine([
+            "event": "sign-result", "id": id,
+            "error": "signing failed: \(error)", "code": "ESIGN",
+          ])
+        }
+      }
+    }
+  }
+}
+
+func laErrorName(_ error: Error?) -> String {
+  guard let la = error as? LAError else { return "unknown" }
+  switch la.code {
+  case .userCancel: return "userCancel"
+  case .systemCancel: return "systemCancel"
+  case .appCancel: return "appCancel"
+  case .authenticationFailed: return "authenticationFailed"
+  case .passcodeNotSet: return "passcodeNotSet"
+  case .biometryNotAvailable: return "biometryNotAvailable"
+  case .biometryNotEnrolled: return "biometryNotEnrolled"
+  case .biometryLockout: return "biometryLockout"
+  case .userFallback: return "userFallback"
+  case .invalidContext: return "invalidContext"
+  case .notInteractive: return "notInteractive"
+  default: return "laError(\(la.code.rawValue))"
+  }
+}
+
 final class Shell: NSObject, WKNavigationDelegate, WKScriptMessageHandlerWithReply {
   let webView: WKWebView
   var window: NSWindow?
+  let hud = CeremonyHud()
   var webauthnSeq = 0
   var webauthnReplies: [Int: (Any?, String?) -> Void] = [:]
 
@@ -168,14 +653,38 @@ final class Shell: NSObject, WKNavigationDelegate, WKScriptMessageHandlerWithRep
         let respData = (try? JSONSerialization.data(withJSONObject: msg["resp"] ?? [:])) ?? Data("{}".utf8)
         reply(String(data: respData, encoding: .utf8), nil)
       }
+    case "hud-show":
+      hud.show(reason: msg["reason"] as? String ?? "Authorize a keybridge ceremony",
+               status: msg["status"] as? String ?? "")
+    case "hud-status":
+      hud.status(msg["status"] as? String ?? "")
+    case "hud-close":
+      hud.close()
+    case "sign":
+      let id = msg["id"] as? Int ?? -1
+      guard let tag = msg["tag"] as? String,
+            let msgB64 = msg["message"] as? String,
+            let message = Data(base64Encoded: msgB64) else {
+        writeLine(["event": "sign-result", "id": id, "error": "sign requires tag and base64 message", "code": "EARGS"])
+        return
+      }
+      hud.sign(id: id, tag: tag, message: message,
+               reason: msg["reason"] as? String ?? "Authorize keybridge signature")
     case "surface":
+      // Never stack two bottom-center panels: the web window takes over
+      // (password login), so the HUD steps aside until the parent closes it.
+      hud.hide()
       surface()
     case "hide":
       window?.orderOut(nil)
     case "close":
       // Small grace so the network process can flush freshly-set cookies to
-      // the persistent store before we die.
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
+      // the persistent store before we die - and long enough that the HUD's
+      // slide-down finishes instead of being cut off by exit(). The parent
+      // sends `hud-close` and `close` back to back, so the animation is
+      // almost always still in flight when we get here.
+      hud.close()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
     default:
       writeLine(["event": "error", "error": "unknown cmd"])
     }

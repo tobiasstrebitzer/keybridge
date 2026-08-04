@@ -14,6 +14,13 @@
 //   FAKE_DIE      exit(7) immediately, before the ready event (launch failure)
 //   FAKE_EXIT_AFTER_EVALS  exit(86) right after answering the Nth eval
 //                 (mid-ceremony shell crash simulation)
+//   FAKE_DISMISS_AFTER_EVALS  emit {"event":"hud-dismissed"} after the Nth
+//                 eval (the human hitting the HUD's ✕ mid-ceremony)
+//   FAKE_SIGN     how the shell answers a `sign` command (embedded Touch ID):
+//                 "<base64>"        -> that signature
+//                 "error:<CODE>"    -> {"error":..,"code":"<CODE>"} e.g.
+//                                      error:userCancel, error:EEMBEDUNAVAIL
+//                 unset             -> a fixed dummy signature
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
@@ -41,7 +48,21 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     if (String(evalCount) === process.env.FAKE_NAV_AFTER_EVALS) {
       out({ event: 'nav', url: 'https://www.npmjs.com/escalate/webauthn' })
     }
+    if (String(evalCount) === process.env.FAKE_DISMISS_AFTER_EVALS) {
+      out({ event: 'hud-dismissed', reason: 'user' })
+    }
     if (String(evalCount) === process.env.FAKE_EXIT_AFTER_EVALS) process.exit(86)
+  }
+  // Embedded Touch ID: the real shell runs LAAuthenticationView + the Secure
+  // Enclave signature here and replies with the DER signature or an LAError.
+  if (msg.cmd === 'sign') {
+    const spec = process.env.FAKE_SIGN ?? 'ZmFrZS1zaWduYXR1cmU='
+    if (spec.startsWith('error:')) {
+      const code = spec.slice('error:'.length)
+      out({ event: 'sign-result', id: msg.id, error: `fake shell refused: ${code}`, code })
+    } else {
+      out({ event: 'sign-result', id: msg.id, signature: spec })
+    }
   }
   if (msg.cmd === 'close') process.exit(0)
 })

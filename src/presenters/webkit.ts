@@ -23,14 +23,20 @@ import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { PublishError, type Presenter } from '../engine.ts'
 import { kblog } from '../log.ts'
-import { CAPTURE_SCRIPT, prefillScript, STATUS_SCRIPT } from './shared.ts'
+import { CAPTURE_SCRIPT, prefillScript, REARM_SCRIPT, STATUS_SCRIPT } from './shared.ts'
 import { handleCreate, handleGet, type CreateOptions, type GetOptions } from '../webauthn.ts'
-import { createSigner } from '../signer.ts'
+import { createSigner, type Signer } from '../signer.ts'
 
 const execFileP = promisify(execFile)
 const HERE = dirname(fileURLToPath(import.meta.url))
 const KB_DIR = join(homedir(), '.keybridge')
 const NATIVE_DIR = resolve(join(HERE, '..', '..', 'native'))
+
+// A live "Use security key" click yields a WebAuthn request within moments;
+// a click that produced none after this long was lost (npm hydration gap)
+// and gets re-armed - at most this many times per page.
+const RECLICK_AFTER_MS = 4000
+const MAX_RECLICKS = 3
 
 export type WebAuthnResponse =
   | { ok: true, credential: unknown }
@@ -75,9 +81,17 @@ export interface WebkitPresenterOptions {
   shellArgs?: string[]
   /** Answers create/get ceremonies. Default: v2 host webauthn + signer (Touch ID via Secure Enclave backend). */
   webauthn?: WebAuthnResponder
+  /** Render the Touch ID prompt inside keybridge's own HUD panel instead of
+   * the system sheet (PRD §6.7). Default on for macOS secure-enclave signing;
+   * KEYBRIDGE_HUD=0 restores the system sheet. Ignored when a custom
+   * `webauthn` responder is supplied - that responder owns its own signing. */
+  hud?: boolean
   /** If the auth page bounces to a password login, show a real window. Default true. */
   surfaceOnLogin?: boolean
   pollIntervalMs?: number
+  /** How long a security-key click may stay unanswered by a WebAuthn request
+   * before it is declared lost and re-armed. Default 4s. */
+  reclickAfterMs?: number
   launchTimeoutMs?: number
   /** Write a JSON snapshot of every distinct page state the shell renders
    * into this directory (DOM debugging). Default: a timestamped dir under
@@ -99,8 +113,16 @@ interface ResolvedOptions {
   ceremonyContext?: CeremonyContext
   captureDir?: string
   webauthn: WebAuthnResponder
+  /** True when the caller supplied `webauthn` - then keybridge does no signing
+   * of its own and the HUD's embedded prompt has nothing to drive. */
+  customResponder: boolean
+  hud: boolean
+  /** Called when the human cancels from the HUD's ✕ (internal; the presenter
+   * turns it into a fatal error so the engine stops polling immediately). */
+  onDismiss?: (reason: string) => void
   surfaceOnLogin: boolean
   pollIntervalMs: number
+  reclickAfterMs: number
   launchTimeoutMs: number
   log: (message: string) => void
   notify: (message: string) => void
@@ -122,8 +144,11 @@ export function resolveWebkitOptions (opts: WebkitPresenterOptions = {}): Resolv
     ...(opts.ceremonyContext ? { ceremonyContext: opts.ceremonyContext } : {}),
     ...(resolveCaptureDir(opts.captureDir)),
     webauthn: opts.webauthn ?? answerWebAuthn,
+    customResponder: opts.webauthn !== undefined,
+    hud: opts.hud ?? process.env.KEYBRIDGE_HUD !== '0',
     surfaceOnLogin: opts.surfaceOnLogin ?? true,
     pollIntervalMs: opts.pollIntervalMs ?? 500,
+    reclickAfterMs: opts.reclickAfterMs ?? RECLICK_AFTER_MS,
     launchTimeoutMs: opts.launchTimeoutMs ?? 15_000,
     // stderr for CLI users; the persistent log because MCP hosts drop stderr.
     log: opts.log ?? ((m) => {
@@ -192,13 +217,67 @@ export function unwrap (v: unknown): unknown {
   return v
 }
 
-// Default ceremony responder. Note: the secure-enclave signer shells out
-// synchronously, so the event loop stalls while the human decides on Touch ID;
-// that's fine - the engine's doneUrl polling just resumes afterwards.
-async function answerWebAuthn (op: string, options: unknown, origin: string, reason?: string): Promise<WebAuthnResponse> {
+/**
+ * A signer whose Secure Enclave signature happens inside the live ceremony
+ * shell, so the Touch ID prompt renders in keybridge's own HUD panel
+ * (LAAuthenticationView) instead of the system sheet - and the same LAContext
+ * unlocks the key, so it costs exactly one touch.
+ *
+ * Key generation and credential selection stay with the base signer: neither
+ * needs user presence, and `keybridge enroll` must keep working without a HUD.
+ * Anything the embedded prompt cannot do (no biometry enrolled, Touch ID
+ * unavailable) rejects with EEMBEDUNAVAIL and falls back to the standalone
+ * helper, so the HUD degrades rather than blocks (PRD §6.6).
+ */
+export function shellSigner (
+  base: Signer,
+  getShell: () => WebShell | null,
+  log: (m: string) => void = () => {},
+): Signer {
+  return {
+    backend: base.backend,
+    register: (rpId, userHandle) => base.register(rpId, userHandle),
+    selectForAssertion: (rpId, allowIds) => base.selectForAssertion(rpId, allowIds),
+    async sign (record, message, reason) {
+      const shell = getShell()
+      if (!shell || record.backend !== 'secure-enclave') {
+        return base.sign(record, message, reason)
+      }
+      const started = Date.now()
+      try {
+        // The HUD renders this as its own sentence, so it leads with a
+        // capital; the system sheet's “"KeyBridge" is trying to <reason>”
+        // phrasing only applies on the fallback path below.
+        const label = reason.charAt(0).toUpperCase() + reason.slice(1)
+        const signature = await shell.sign(record.keyTag, message, label)
+        kblog('se-shell-sign', { ok: true, ms: Date.now() - started })
+        return signature
+      } catch (e) {
+        const err = e as Error & { code?: string }
+        kblog('se-shell-sign', {
+          ok: false, ms: Date.now() - started, error: err.message, ...(err.code ? { code: err.code } : {}),
+        })
+        // Only an unusable embedded prompt is worth retrying elsewhere. A
+        // userCancel is the human saying no - re-asking through the system
+        // sheet would be a second prompt they did not ask for.
+        if (err.code !== 'EEMBEDUNAVAIL' && err.code !== 'ENOKEY') throw err
+        log(`embedded Touch ID unavailable (${err.code}) - falling back to the system sheet`)
+        return base.sign(record, message, reason)
+      }
+    },
+  }
+}
+
+// Default ceremony responder. Note: the standalone secure-enclave signer shells
+// out synchronously, so the event loop stalls while the human decides on Touch
+// ID; that's fine - the engine's doneUrl polling just resumes afterwards. The
+// shell signer (above) is async and does not stall.
+async function answerWebAuthn (
+  op: string, options: unknown, origin: string, reason?: string, signerOverride?: Signer,
+): Promise<WebAuthnResponse> {
   const started = Date.now()
   try {
-    const signer = createSigner()
+    const signer = signerOverride ?? createSigner()
     const opts = unwrap(options)
     const credential = op === 'create'
       ? await handleCreate(opts as CreateOptions, origin, signer)
@@ -237,6 +316,9 @@ interface ShellMessage {
   id?: number
   value?: unknown
   error?: string
+  code?: string
+  signature?: string
+  reason?: string
   url?: string
   op?: string
   options?: unknown
@@ -248,7 +330,13 @@ export class WebShell {
   #child: ChildProcess
   #evalSeq = 0
   #pendingEvals = new Map<number, { resolve: (v: unknown) => void, reject: (e: Error) => void }>()
+  #signSeq = 0
+  #pendingSigns = new Map<number, { resolve: (v: Buffer) => void, reject: (e: Error) => void }>()
   #log: (m: string) => void
+  /** Main-frame loads seen so far - the page-epoch counter. In-page one-shot
+   * flags die with each epoch (but survive SPA route changes, which don't
+   * tick this). */
+  navCount = 0
   /** Resolves with the exit code once the shell process is gone. */
   readonly exited: Promise<number | null>
 
@@ -301,6 +389,10 @@ export class WebShell {
         if (!ready) reject(new Error(`webkit shell exited with code ${code} before ready`))
         for (const p of shell.#pendingEvals.values()) p.reject(new Error('webkit shell exited'))
         shell.#pendingEvals.clear()
+        // A pending sign is a human staring at a Touch ID prompt that just
+        // died with the shell - reject it rather than hang the ceremony.
+        for (const p of shell.#pendingSigns.values()) p.reject(new Error('webkit shell exited'))
+        shell.#pendingSigns.clear()
       })
     })
   }
@@ -323,7 +415,35 @@ export class WebShell {
           .then((resp) => this.send({ cmd: 'webauthn-result', id, resp }))
         break
       }
+      case 'sign-result': {
+        const pending = this.#pendingSigns.get(msg.id ?? -1)
+        if (!pending) return
+        this.#pendingSigns.delete(msg.id ?? -1)
+        if (typeof msg.signature === 'string') {
+          pending.resolve(Buffer.from(msg.signature, 'base64'))
+        } else {
+          const err = new Error(msg.error ?? 'shell signing failed') as Error & { code?: string }
+          if (msg.code) err.code = msg.code
+          pending.reject(err)
+        }
+        break
+      }
+      case 'hud':
+        this.#log(`ceremony HUD shown (visible: ${(msg as { visible?: boolean }).visible})`)
+        break
+      case 'hud-focus':
+        // Losing key status mid-prompt pauses Touch ID; the shell claws it
+        // back, but record both edges so a stalled ceremony is explicable.
+        this.#log((msg as { key?: boolean }).key
+          ? 'ceremony sheet has focus'
+          : 'ceremony sheet lost focus - Touch ID is paused until it returns')
+        break
+      case 'hud-dismissed':
+        this.#log(`ceremony cancelled from the sheet (${msg.reason ?? 'user'})`)
+        o.onDismiss?.(msg.reason ?? 'user')
+        break
       case 'nav':
+        this.navCount++
         this.#log(`page: ${msg.url}`)
         break
       case 'surfaced':
@@ -346,6 +466,34 @@ export class WebShell {
     return new Promise((resolvePromise, reject) => {
       this.#pendingEvals.set(id, { resolve: resolvePromise, reject })
       this.send({ cmd: 'eval', id, js })
+    })
+  }
+
+  /** Show the ceremony HUD (no keyboard focus taken until a prompt runs). */
+  hudShow (reason: string, status: string): void {
+    this.send({ cmd: 'hud-show', reason, status })
+  }
+
+  hudStatus (status: string): void {
+    this.send({ cmd: 'hud-status', status })
+  }
+
+  hudClose (): void {
+    this.send({ cmd: 'hud-close' })
+  }
+
+  /**
+   * Secure Enclave signature performed INSIDE the shell, so the LAContext that
+   * drove the embedded Touch ID prompt is the one that unlocks the key - one
+   * touch, no system sheet. Rejects with a coded Error (LAError name, or
+   * EEMBEDUNAVAIL when the embedded prompt cannot run at all) so the caller
+   * can fall back to the standalone signer.
+   */
+  sign (tag: string, message: Buffer, reason: string): Promise<Buffer> {
+    const id = ++this.#signSeq
+    return new Promise((resolvePromise, reject) => {
+      this.#pendingSigns.set(id, { resolve: resolvePromise, reject })
+      this.send({ cmd: 'sign', id, tag, message: Buffer.from(message).toString('base64'), reason })
     })
   }
 
@@ -425,19 +573,47 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
     // window is surfaced a human is present and can use npm's own fallbacks
     // (e.g. "use a recovery code"), so ENOCRED is no longer fatal.
     const state = { surfaced: false, fatal: null as PublishError | null }
+    // What the click supervisor (below) needs to know about ceremonies: which
+    // page epoch last produced a WebAuthn request, and whether one is being
+    // answered right now (the human may be looking at the Touch ID sheet).
+    const ceremony = { epoch: -1, pending: 0 }
+    let shell!: WebShell
+    // With the HUD on, signing moves INTO the shell so the Touch ID prompt
+    // renders in our own panel (PRD §6.7). A caller-supplied responder does
+    // its own signing, so it opts out automatically.
+    const hudOn = o.hud && !o.customResponder
+    const signer = hudOn ? shellSigner(createSigner(), () => shell, o.log) : undefined
     const run: ResolvedOptions = {
       ...o,
+      // The ✕ is meant to be equivalent to ctrl-C: without this the ceremony
+      // would just fail silently on the page and the engine would keep polling
+      // doneUrl until the five-minute timeout.
+      onDismiss: (why) => {
+        const err = new PublishError(
+          `the keybridge ceremony was cancelled from the sheet (${why})`, { code: 'ECANCEL' })
+        err.fatal = true
+        state.fatal = err
+        kblog('ceremony-cancelled', { reason: why })
+      },
       webauthn: async (op, options, origin) => {
-        const resp = await o.webauthn(op, options, origin, reason)
-        if (!resp.ok && resp.code === 'ENOCRED' && !state.surfaced) {
-          const err = new PublishError(
-            'npm asked for a security key that keybridge has not enrolled for this account - run `keybridge enroll` for it (`keybridge status` shows which accounts have keys)',
-            { code: 'ENOCRED' })
-          err.fatal = true
-          state.fatal = err
-          o.notify('keybridge has no security key for this npm account - run `keybridge enroll`')
+        ceremony.epoch = shell?.navCount ?? 0
+        ceremony.pending++
+        try {
+          const resp = o.customResponder
+            ? await o.webauthn(op, options, origin, reason)
+            : await answerWebAuthn(op, options, origin, reason, signer)
+          if (!resp.ok && resp.code === 'ENOCRED' && !state.surfaced) {
+            const err = new PublishError(
+              'npm asked for a security key that keybridge has not enrolled for this account - run `keybridge enroll` for it (`keybridge status` shows which accounts have keys)',
+              { code: 'ENOCRED' })
+            err.fatal = true
+            state.fatal = err
+            o.notify('keybridge has no security key for this npm account - run `keybridge enroll`')
+          }
+          return resp
+        } finally {
+          ceremony.pending--
         }
-        return resp
       },
     }
 
@@ -447,7 +623,6 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
     // timeout would just be a silent hang. Both cases are FATAL - the engine
     // aborts doneUrl polling immediately and the caller gets a diagnosable
     // error instead of five quiet minutes.
-    let shell: WebShell
     try {
       await ensureShellBinary(o)
       shell = await WebShell.start(run)
@@ -463,6 +638,14 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
     void shell.exited.then((code) => { shellExit.code = code })
     try {
       shell.send({ cmd: 'navigate', url: authUrl })
+      // The HUD is the ceremony's visible surface from here on. It only takes
+      // keyboard focus when a prompt actually runs (see focusForPrompt in
+      // WebShell.swift), so showing it early costs the user nothing.
+      if (hudOn) {
+        shell.hudShow(
+          reason ? reason.charAt(0).toUpperCase() + reason.slice(1) : 'Authorize a keybridge ceremony',
+          'talking to npm…')
+      }
 
       // The engine owns completion: it aborts the signal once doneUrl flips.
       // Polling never stops: the auto-click is per PAGE, not per ceremony -
@@ -473,7 +656,18 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
       // flags INSIDE the page (they reset on navigation), so the presenter
       // needs no navigation bookkeeping at all.
       const capture = run.captureDir ? new DomCapture(run.captureDir, o.log) : null
-      let announcedClick = false
+      // Click supervision. 'clicked' only means the page-side flag is set - a
+      // click that landed before npm's React handler attached did NOTHING,
+      // and the one-shot flag then blocks every retry (the silent "no Touch
+      // ID, no error" hang of 2026-08-04). Only the presenter can tell a dead
+      // click from a live one: a live one is followed by a WebAuthn request
+      // within moments. A click cycle that stays silent past RECLICK_AFTER_MS
+      // gets re-armed - but never while a ceremony is being answered (a human
+      // may be looking at the Touch ID sheet) and never on a page that
+      // already produced one (no prompt spam after a deliberate cancel).
+      let clickEpoch = -1
+      let clickedAt = 0
+      let rearms = 0
       let announcedPrefill = false
       while (!signal.aborted) {
         if (state.fatal) throw state.fatal
@@ -494,9 +688,20 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
           o.log('ticked npm\'s "remember for 5 minutes" option - publishes in the next 5 minutes should skip the ceremony')
         }
         await capture?.tick(shell)
-        if (status === 'clicked' && !announcedClick) {
-          announcedClick = true
-          o.log('ceremony triggered - waiting for Touch ID approval')
+        if (status === 'clicked') {
+          if (clickEpoch !== shell.navCount) {
+            clickEpoch = shell.navCount
+            clickedAt = Date.now()
+            rearms = 0
+            o.log('ceremony triggered - waiting for Touch ID approval')
+            if (hudOn) shell.hudStatus('npm asked for your security key…')
+          } else if (ceremony.pending === 0 && ceremony.epoch < clickEpoch
+            && rearms < MAX_RECLICKS && Date.now() - clickedAt > o.reclickAfterMs) {
+            rearms++
+            clickedAt = Date.now()
+            o.log(`the security-key click started no ceremony - re-clicking (${rearms}/${MAX_RECLICKS})`)
+            await shell.eval(REARM_SCRIPT).catch(() => {})
+          }
         } else if (status === 'login-page') {
           if (o.surfaceOnLogin && !state.surfaced) {
             state.surfaced = true
@@ -522,6 +727,7 @@ export function webkitPresenter (opts: WebkitPresenterOptions = {}): Presenter {
       throw e
     } finally {
       kblog('ceremony-end', { aborted: signal.aborted })
+      if (hudOn) shell.hudClose()
       shell.close()
     }
   }

@@ -39,6 +39,10 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   distinct page state to `~/.keybridge/captures/<ts>/` - the way to learn
   npm's auth-page DOM from a real ceremony. No desktop notifications
   anywhere - deliberately removed; the sheet is the signal.
+  `shellSigner` routes Secure Enclave signatures through the LIVE shell
+  (`sign` command) so Touch ID renders in keybridge's own HUD sheet instead of
+  the system dialog - see "Ceremony HUD" below. `KEYBRIDGE_HUD=0` restores the
+  old invisible flow.
 - `src/webauthn.ts` + `src/signer.ts` + `src/cbor.ts` - the authenticator:
   assembles clientDataJSON/authenticatorData/attestation, stores credentials in
   `~/.keybridge/credentials.json`, signs via Secure Enclave helper (Touch ID)
@@ -55,10 +59,16 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   token|publish [--user]`), `src/server.ts` (MCP stdio), `src/actions/`
   (`NpmPublish` + `NpmLogin` + `NpmStatus` + `NpmSwitchAccount`). Agent flow:
   NpmStatus → (NpmSwitchAccount) → NpmPublish `{ user }`.
-- `native/` - `WebShell.swift` (windowless WKWebView ceremony shell),
+- `native/` - `WebShell.swift` (windowless WKWebView ceremony shell **plus the
+  Ceremony HUD**: the bottom sheet that hosts Touch ID in-process via
+  `LAAuthenticationView` and performs the SE signature itself),
   `inject.js` (page-world `navigator.credentials` override over
   `webkit.messageHandlers`, Bitwarden-style `ENOCRED` fallback to the real
-  authenticator), `SecureEnclaveSigner.swift`.
+  authenticator), `SecureEnclaveSigner.swift` (still the standalone signer:
+  `create`/`probe`, and the fallback when the HUD is off or unusable),
+  `EmbeddedTouchIDProbe.swift` (the M0 spike behind the HUD; run it with
+  `scripts/debug-touchid-embedded.sh [count] [policy]`, which prints its own
+  GO/NO-GO verdict from the probe events + the LocalAuthentication log).
 - `hooks/`, `skills/`, `.claude-plugin/`, `scripts/`, `.mcp.json` - the Claude
   plugin; the repo is its own marketplace (`claude plugin marketplace add
   tobiasstrebitzer/keybridge` → `claude plugin install keybridge@keybridge`).
@@ -107,7 +117,51 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   nonstop and one-click/one-prefill-per-page is enforced by `window` flags
   INSIDE the page (they reset on navigation). Never track navigation counts
   presenter-side: eval-result and nav events can land in one pipe chunk, so
-  counter snapshots race (was a real flaky-hang bug).
+  counter snapshots race (was a real flaky-hang bug). A click can also land
+  in npm's HYDRATION GAP (button rendered, React handler not attached): it
+  does nothing and the one-shot flag would block every retry - the
+  2026-08-04 silent hangs ("clicked", then no webauthn get, no Touch ID, no
+  error, 5-min timeout). The presenter therefore supervises clicks: a click
+  cycle with no WebAuthn request after `reclickAfterMs` (4s) is re-armed via
+  REARM_SCRIPT, max 3 times per page epoch (`WebShell.navCount`), and never
+  while a ceremony is pending or after the page already produced one (no
+  prompt spam after a human cancel).
+- **Ceremony HUD (embedded Touch ID).** Touch ID renders INSIDE keybridge's
+  own bottom sheet (`LAAuthenticationView`), and the SE signature is made in
+  the shell on that same `LAContext` - so one touch, no system dialog, and no
+  frontmost-process lottery. Protocol: `hud-show`/`hud-status`/`hud-close`/
+  `sign` down, `sign-result`/`hud`/`hud-focus`/`hud-dismissed` up. Measured
+  facts that constrain any change here (full write-up in the PRD, `_docs/`):
+  - **The panel MUST become the key window** or LocalAuthentication silently
+    PAUSES the prompt (`"LAAuthenticationView is not visible to user because
+    NSApplication is not active"`), resuming only on
+    `NSWindowDidBecomeKeyNotification` - i.e. after the human clicks it.
+    `orderFrontRegardless()` alone is not enough; `makeKeyAndOrderFront` is.
+    On a `.nonactivatingPanel` key ≠ active, so this costs no activation
+    (verified: the user's app stays frontmost throughout). The sheet is
+    `.borderless`, which returns false from `canBecomeKey` by default - hence
+    the `HudPanel` subclass overriding it.
+  - Focus lost mid-prompt is clawed back (max 8 times/prompt, then it stops
+    fighting and shows "click this sheet"). `NSApp.isActive` is NOT a
+    focus-theft metric - it reads true for a key non-activating panel; only
+    `NSWorkspace.frontmostApplication` answers that.
+  - The view is **non-textual** (icon only), so the reason line we draw is the
+    only thing naming what is being approved - not decoration.
+  - Embedded policies are biometry/companion ONLY (no password fallback in
+    view). `EEMBEDUNAVAIL`/`ENOKEY` fall back to the standalone signer; a
+    `userCancel` deliberately does NOT (re-asking = a prompt nobody wanted).
+  - One `LAAuthenticationView` per ceremony (it is permanently paired with one
+    single-use `LAContext`), but the PANEL persists - so chained ceremonies
+    read as one continuous sheet.
+  - Sheet geometry: the window hangs 28pt BELOW the screen edge, because the
+    window shadow wraps all four sides and a bottom edge on the screen edge
+    renders as a border plus radial corner dimming. Height is content-driven
+    (`stack.bottom == content.bottom - bleed`, sized to `fittingSize`); a `<=`
+    there lets content overflow into the off-screen bleed and the status line
+    vanishes.
+  - The ✕ cancels the ACTION, not the sheet: invalidates the context and emits
+    `hud-dismissed` → fatal `ECANCEL`, or the engine would poll doneUrl for
+    five more minutes after the human gave up.
 - Surfaced-window UX (WebShell.swift): the window is a bottom-center
   NON-ACTIVATING NSPanel (418×678 sheet - under npm's responsive breakpoint,
   so the page uses its compact layout; hidden titlebar + hidden traffic
@@ -139,7 +193,13 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   precise LAError codes in `{"error","code"}`, one retry on systemCancel/
   notInteractive). `KEYBRIDGE_SE_DEBUG=1` traces each step to stderr;
   `scripts/debug-touchid.sh [n]` reproduces an n-prompt chain with a
-  throwaway key while tailing the LocalAuthentication system log.
+  throwaway key while tailing the LocalAuthentication system log. The
+  recurring "macOS won't show Touch ID for a Claude-spawned process" theory
+  is REFUTED (2026-08-04, direct experiment: debug-touchid.sh run from a
+  Claude Code Bash tool presented the sheet fine while another app was
+  frontmost, and a terminal-direct ceremony failed the same day) - an
+  SE-helper `userCancel` means the sheet/notification was dismissed during
+  that attempt, not that macOS refused to present.
 - npm's publish 2FA page offers a 5-minute "cooldown" (remember me), keyed on
   IP + access token: once ticked (STATUS_SCRIPT does it automatically),
   follow-up publishes inside the window don't even hit EOTP - the first
