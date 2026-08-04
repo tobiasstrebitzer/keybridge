@@ -329,6 +329,22 @@ final class CeremonyHud: NSObject {
     return max(content.fittingSize.height, minSheetHeight + bleed)
   }
 
+  /// The spinner and the LAAuthenticationView SHARE the auth slot, so the only
+  /// safe states are "spinning, no prompt" and "prompt, no spinner". Hiding is
+  /// explicit rather than left to `isDisplayedWhenStopped`, and starting is
+  /// refused while a prompt is mounted - measured 2026-08-04: the blue Done
+  /// checkmark drew straight over a running spinner, both visible at once.
+  private func setSpinner(_ spinning: Bool) {
+    if spinning {
+      guard authView == nil else { return }
+      spinner.isHidden = false
+      spinner.startAnimation(nil)
+    } else {
+      spinner.stopAnimation(nil)
+      spinner.isHidden = true
+    }
+  }
+
   /// Re-fit an already-visible sheet, keeping its bottom pinned below the
   /// screen edge so it grows upward rather than sliding.
   private func refit() {
@@ -406,9 +422,9 @@ final class CeremonyHud: NSObject {
     let panel = self.panel ?? build()
     self.panel = panel
     // Before the early-return below, so a chained ceremony's wait spins too.
-    // Never over the prompt: once the fingerprint is mounted the human is the
-    // one being waited on, and a spinner would claim otherwise.
-    if authView == nil { spinner.startAnimation(nil) }
+    // setSpinner refuses while a prompt is mounted: there the human is the one
+    // being waited on, and a spinner would claim otherwise.
+    setSpinner(true)
 
     // Already up and staying up - just the text changed.
     if panel.isVisible && !slidingOut { return }
@@ -441,7 +457,7 @@ final class CeremonyHud: NSObject {
     slidingOut = true
     // A sheet on its way out is not waiting for anything, and an off-screen
     // panel should not keep an animation running.
-    spinner.stopAnimation(nil)
+    setSpinner(false)
     let target = offscreenFrame(restingFrame == .zero ? restingFrameFor(panel) : restingFrame)
     NSAnimationContext.runAnimationGroup({ ctx in
       ctx.duration = slideDuration
@@ -546,8 +562,9 @@ final class CeremonyHud: NSObject {
     let view = LAAuthenticationView(context: ctx, controlSize: .regular)
     view.translatesAutoresizingMaskIntoConstraints = false
     // The slot changes hands here: we are done waiting on npm, the human is
-    // now the one being waited on.
-    spinner.stopAnimation(nil)
+    // now the one being waited on. Must be fully hidden, not merely stopped -
+    // the two overlap in this slot.
+    setSpinner(false)
     authSlot.addSubview(view)
     NSLayoutConstraint.activate([
       view.centerXAnchor.constraint(equalTo: authSlot.centerXAnchor),
@@ -571,11 +588,13 @@ final class CeremonyHud: NSObject {
           ])
           return
         }
-        // Approved: the slot is empty again and the waiting is ours once more
-        // (the signature, then whatever npm does with it - and npm's login
-        // flow can chain a second ceremony onto the same sheet). Deliberately
-        // NOT in the failure path above: nothing is in flight there.
-        self.spinner.startAnimation(nil)
+        // NO spinner restart here, deliberately. evaluatePolicy's completion
+        // fires the moment the biometric matches, while the view is still
+        // playing its blue Done animation - and that animation outlives
+        // removeFromSuperview(), so a restart drew the spinner straight
+        // through the checkmark. The Done animation IS the feedback for this
+        // moment; the sheet closes seconds later, and a chained ceremony gets
+        // its spinner back from the show() in the next sign().
         do {
           let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: ctx)
           let signature = try key.signature(for: message) // no second prompt

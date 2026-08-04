@@ -168,14 +168,20 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
     `NSWorkspace.frontmostApplication` answers that.
   - The view is **non-textual** (icon only), so the reason line we draw is the
     only thing naming what is being approved - not decoration.
-  - The auth slot holds a spinner whenever no `LAAuthenticationView` is
-    mounted, because the sheet is up for seconds before npm challenges and its
-    whole middle was otherwise blank. Rule: it spins only while KEYBRIDGE is
-    waiting (show → prompt mount, and again after an approval while the
-    signature/publish finish) - never over the prompt, where the human is the
-    one being waited on, and never after a failure, where nothing is in
-    flight. It is centered and intrinsically sized, so toggling it cannot
-    change `fittingSize` and jump the sheet.
+  - The auth slot holds a spinner while keybridge waits on npm, because the
+    sheet is up for seconds before npm challenges and its whole middle was
+    otherwise blank. It shares the slot with `LAAuthenticationView`, so the
+    only safe states are "spinning, no prompt" and "prompt, no spinner" -
+    everything goes through `setSpinner`, which hides EXPLICITLY (not just
+    `isDisplayedWhenStopped`) and refuses to start while a prompt is mounted.
+    **Never restart it in the evaluatePolicy completion**: that fires the
+    instant the biometric matches, while the view is still playing its blue
+    Done animation, and that animation OUTLIVES `removeFromSuperview()` - so a
+    restart there drew the spinner straight through the checkmark (seen
+    2026-08-04). The Done animation is the feedback for that moment; a chained
+    ceremony gets its spinner back from the `show()` in the next `sign()`. The
+    spinner is centered and intrinsically sized, so toggling it cannot change
+    `fittingSize` and jump the sheet.
   - Embedded policies are biometry/companion ONLY (no password fallback in
     view). `EEMBEDUNAVAIL`/`ENOKEY` fall back to the standalone signer; a
     `userCancel` deliberately does NOT (re-asking = a prompt nobody wanted).
