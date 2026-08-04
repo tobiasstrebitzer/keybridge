@@ -62,6 +62,9 @@ test('the guard is not greedy: text ABOUT publishing is not a publish', async ()
     'python3 -c "print(\'npm publish\')"',
     "cat > smoke.mjs <<'EOF'\nconsole.log('npm publish')\nEOF",
     'cat > README.md <<EOF\nRun npm publish to release.\nEOF',
+    // Reading the docs is not publishing (hit while prepping the workerdeck E2E).
+    'pnpm publish --help',
+    'npm publish -h',
   ]
   for (const command of allowed) {
     const { code, stdout } = await runGuard({ tool_name: 'Bash', tool_input: { command } })
@@ -80,6 +83,7 @@ test('scrubbing does not open a bypass', async () => {
     'node -e "console.log(\'hi\')" && npm publish',             // real publish after an inline script
     'git commit -m "chore: release" && npm publish',            // real publish after a message
     'bash <<EOF\nnpm publish\nEOF',                             // heredoc FED TO A SHELL runs
+    'npm publish --help && npm publish',                        // help on ONE invocation excuses only that one
   ]
   for (const command of denied) {
     const { code, stdout } = await runGuard({ tool_name: 'Bash', tool_input: { command } })

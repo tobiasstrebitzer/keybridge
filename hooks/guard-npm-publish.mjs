@@ -53,10 +53,20 @@ scrubbed = scrubbed.replace(INLINE_SCRIPT_RE, blankQuoted)
 // Match `npm publish` / `pnpm publish` / `yarn publish` / `npm stage publish`
 // anywhere in the command line (including after && ; | and inside quotes,
 // e.g. `bash -c "npm publish"`), tolerating intervening flags, but not words
-// like "publisher" or file paths.
-const PUBLISH_RE = /(?:^|[\s;&|("'])(?:npm|pnpm|yarn)\s+(?:[\w:-]+\s+)*publish(?:\s|$|;|&|\||["'])/
+// like "publisher" or file paths. The trailing lookahead keeps `npm run
+// publish-docs` out; the capture grabs that invocation's own arguments.
+const PUBLISH_RE =
+  /(?:^|[\s;&|("'])(?:npm|pnpm|yarn)\s+(?:[\w:-]+\s+)*publish(?=\s|$|;|&|\||["'])([^;&|]*)/g
 
-if (PUBLISH_RE.test(scrubbed)) {
+// `npm publish --help` reads documentation, it does not publish. Checked per
+// invocation rather than over the whole line, so `npm publish --help && npm
+// publish` is still denied on the second one.
+const HELP_RE = /\s--?h(?:elp)?(?=\s|$)/
+
+const invocations = [...scrubbed.matchAll(PUBLISH_RE)]
+const wouldPublish = invocations.some(([, args]) => !HELP_RE.test(args ?? ''))
+
+if (wouldPublish) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
