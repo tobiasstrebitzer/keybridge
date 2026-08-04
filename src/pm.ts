@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { PublishError, runNpm } from './engine.ts'
 import { kblog } from './log.ts'
+import { assertPnpmVersion } from './versions.ts'
 
 export type PackageManager = 'npm' | 'pnpm'
 
@@ -85,6 +86,11 @@ export interface PublishTarget {
 
 const noop = (): void => {}
 
+const PNPM_REQUIRED =
+  'keybridge packs pnpm projects with pnpm so workspace:/catalog: dependencies become real ' +
+  'versions before publishing - npm would ship them verbatim and break consumers. ' +
+  'Install pnpm, or force the npm strategy if this package has no such dependencies.'
+
 export interface ResolvePublishTargetOptions {
   /** Skip detection and use this manager. */
   packageManager?: PackageManagerChoice
@@ -104,6 +110,16 @@ export async function resolvePublishTarget (
   const manager = packageManager === 'auto' ? detectPackageManager(cwd) : packageManager
   if (manager !== 'pnpm') return { manager, cleanup: noop }
 
+  // Fail on a missing or ancient pnpm here rather than on some downstream
+  // difference in its pack contract (see src/versions.ts for the floor
+  // policy). A too-old pnpm keeps the version error; an absent one gets the
+  // explanation of why pnpm is required at all.
+  await assertPnpmVersion(env ? { env } : {}).catch((e: unknown) => {
+    const err = e as PublishError
+    if (err.code !== 'ENOTOOL') throw err
+    throw new PublishError(`this is a pnpm project but \`pnpm\` could not be run. ${PNPM_REQUIRED}`, { code: 'EPACKMGR' })
+  })
+
   const dir = mkdtempSync(join(tmpdir(), 'keybridge-pack-'))
   const discard = () => rmSync(dir, { recursive: true, force: true })
   let res
@@ -112,10 +128,7 @@ export async function resolvePublishTarget (
   } catch (e) {
     discard()
     throw new PublishError(
-      `this is a pnpm project but \`pnpm\` could not be run (${(e as Error).message}). ` +
-      'keybridge packs pnpm projects with pnpm so workspace:/catalog: dependencies become real ' +
-      'versions before publishing - npm would ship them verbatim and break consumers. ' +
-      'Install pnpm, or force the npm strategy if this package has no such dependencies.',
+      `this is a pnpm project but \`pnpm\` could not be run (${(e as Error).message}). ${PNPM_REQUIRED}`,
       { code: 'EPACKMGR' })
   }
   if (res.code !== 0) {

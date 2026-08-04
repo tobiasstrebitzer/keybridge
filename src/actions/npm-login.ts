@@ -7,6 +7,7 @@ import { z } from 'zod/v4'
 import { loginAs } from '../accounts.ts'
 import { PublishError, type StatusEvent } from '../engine.ts'
 import { currentLogFile, kblog } from '../log.ts'
+import { assertNpmVersion } from '../versions.ts'
 
 const input = z.object({
   registry: z.string().url()
@@ -35,6 +36,7 @@ export const NpmLoginAction = createAction({
   disposition: 'structured',
   annotations: { openWorldHint: true },
   run: async ({ registry }, context) => {
+    await assertNpmVersion()
     kblog('tool', { tool: 'npm-login', registry: registry ?? null })
     const logger = context.getOptional<Logger>('logger')
     let progress = 0

@@ -600,6 +600,12 @@ test('ceremonyReason phrases every purpose/context combination', () => {
   assert.equal(ceremonyReason('publish', undefined), 'publish a package to npm')
   assert.equal(ceremonyReason('login', { user: 'bob' }), 'log in to npm as bob')
   assert.equal(ceremonyReason('login', undefined), 'log in to npm')
+  // A trust ceremony approves a STANDING grant to CI, not one release - the
+  // sheet must not read like a publish.
+  assert.equal(
+    ceremonyReason('trust', { pkg: '@acme/client', user: 'bob' }),
+    'configure trusted publishing for @acme/client on npm as bob')
+  assert.equal(ceremonyReason('trust', undefined), 'configure trusted publishing for a package on npm')
   assert.equal(ceremonyReason(undefined, { pkg: 'a@1.0.0' }), undefined, 'no purpose -> default rpId phrasing downstream')
 })
 

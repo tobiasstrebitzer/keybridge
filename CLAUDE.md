@@ -17,6 +17,16 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   throw a `PublishError` with `fatal = true` to abort doneUrl polling early.
   `spec` names what npm publishes (`npm publish <spec>`); `cwd` still decides
   registry / token / package name.
+- `src/trust.ts` - npm trusted publishers (GitHub Actions OIDC) over plain
+  HTTP: `trustPackages` (one POST per package, ceremony only when the registry
+  challenges) and `listTrust`. Deliberately does NOT drive `npm trust` - see
+  the gotcha below. Reuses the engine's `presentAndPoll`.
+- `src/versions.ts` - the tool floors. **npm >= 12 is a hard requirement for
+  keybridge as a whole** (`assertNpmVersion`, memoized on success only, called
+  from the CLI and every MCP action); pnpm >= 11 gates the pack path. No
+  compatibility shims anywhere: too old is an `EVERSION` error naming the
+  upgrade, and a missing tool is `ENOTOOL` so callers can reword it (pm.ts
+  turns it back into its EPACKMGR explanation).
 - `src/pm.ts` - the package-manager strategy: `detectPackageManager` (nearest
   `packageManager` field → pnpm-workspace/lock → npm lockfiles → npm) and
   `resolvePublishTarget`, which packs pnpm projects with `pnpm pack` and hands
@@ -63,9 +73,10 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
 - `src/setup.ts` - `keybridge setup`: compiles both Swift helpers into
   `~/.keybridge/`, probes the Enclave, writes `config.json`.
 - `src/cli.ts` (`keybridge setup|status|enroll|login|switch|logout|open|
-  token|publish [--user] [--pm]`), `src/server.ts` (MCP stdio), `src/actions/`
-  (`NpmPublish` + `NpmLogin` + `NpmStatus` + `NpmSwitchAccount`). Agent flow:
-  NpmStatus → (NpmSwitchAccount) → NpmPublish `{ user }`.
+  token|publish [--user] [--pm]|trust [ls]|logs`), `src/server.ts` (MCP
+  stdio), `src/actions/` (`NpmPublish` + `NpmLogin` + `NpmStatus` +
+  `NpmSwitchAccount` + `NpmTrust`). Agent flow: NpmStatus →
+  (NpmSwitchAccount) → NpmPublish `{ user }` → NpmTrust once the name exists.
 - `native/` - `WebShell.swift` (windowless WKWebView ceremony shell **plus the
   Ceremony HUD**: the bottom sheet that hosts Touch ID in-process via
   `LAAuthenticationView` and performs the SE signature itself),
@@ -92,9 +103,12 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
   below): `--check` runs inside `pnpm check`, and the npm `version` lifecycle
   hook syncs + stages it on every bump.
 - `tests/` - `node --test`, all TS. `mock-registry.ts` reproduces npmjs.com's
-  CLI contract; `helpers/fake-shell.mjs` mimics the WKWebView shell's stdio
-  protocol; `inject.test.ts` runs `native/inject.js` against throwing stub
-  prototypes + real crypto.
+  CLI contract (publish + web-auth + the `/trust` routes, incl. the 2FA
+  amnesty and the `message`-not-`error` 400); `helpers/fake-shell.mjs` mimics
+  the WKWebView shell's stdio protocol; `inject.test.ts` runs
+  `native/inject.js` against throwing stub prototypes + real crypto.
+  `trust.test.ts` also drives the REAL `npm trust` against the mock to pin the
+  non-interactive finding (skipped below npm 12).
 - `_docs/` - **gitignored** dev/session notes (flow captures, UX research,
   runbooks).
 
@@ -211,7 +225,43 @@ survives) using **silkweave** (`@silkweave/core` + `@silkweave/mcp`).
 - npm 11.9.0-11.14.x redact publish `authUrl`/`doneUrl` (`…/***`; fixed in
   11.15.0; pre-11.9 omits the URLs entirely) →
   `engine.mintWebAuthSession` recovers unredacted URLs via a metadata-only
-  `PUT` with `npm-auth-type: web`.
+  `PUT` with `npm-auth-type: web`. (Below the npm >= 12 floor now, so the
+  redaction case itself is unreachable; the mint path still covers a registry
+  that omits the URLs.)
+- **npm 12 keys `npm publish --json` by package name** -
+  `{"<name>":{"id":…}}` instead of npm 11's flat `{"id":…}`. Reading `.id`
+  therefore returns undefined and a SUCCESSFUL publish reported "npm exited
+  without a publish result / nothing was published" (found 2026-08-04 while
+  building trust; `engine.publishedId` is the single reader now).
+- **Trusted publishing talks HTTP, never `npm trust`** (`src/trust.ts`).
+  Measured against npm 12.0.2, 2026-08-04: `otplease` (npm/lib/utils/auth.js)
+  opens with `if (!process.stdin.isTTY || !process.stdout.isTTY) throw err`
+  BEFORE its web-auth branch, so a spawned `npm trust` fails fast with EOTP
+  having only PRINTED authUrl/doneUrl - the ceremony never runs (probed: auth
+  page never fetched). keybridge always spawns without a TTY, so wrapping the
+  CLI cannot work at all. Two corollaries measured at the same time:
+  `npm trust ... --otp=<token>` DOES work non-interactively (unlike pnpm's
+  `--otp`), so a mint-then-CLI hybrid stays available; and `npm trust` rejects
+  `--userconfig` (its option list is closed), so its token must come from env
+  or the user npmrc. Wire format is byte-identical to npm 12's:
+  `POST /-/package/<npa-escaped>/trust` with
+  `[{type:'github',claims:{repository,workflow_ref:{file},environment?},permissions:[…]}]`;
+  `%2f` is lowercase (npa), `list` is GET on the same URI, `revoke` is
+  DELETE `…/trust/<id>` - all three 2FA-gated, no cheap read path, no batch
+  route (the "bulk" in npm's changelog is the amnesty window, not an API).
+- **The trust endpoint reports failures in `body.message`, not `body.error`**
+  - and npm 11's bundled npm-registry-fetch only printed `error`
+  (npm/cli#9377), which is why a missing `permissions` field surfaced as a
+  bare `400 Bad Request` at every loglevel. Fixed in npm 12's bundle. Talking
+  HTTP directly sidesteps it entirely: `trust.registryMessage` reads both.
+  `permissions` is mandatory and npm 11 could not send it at all - another
+  reason for the version floor.
+- Trust configs are **appended, not replaced**: re-running mints a new id
+  rather than updating, so a blind retry silently duplicates. That is why a
+  failed ceremony mid-run returns the partial outcome instead of throwing it
+  away. And a package must EXIST on the registry before it can be trusted
+  (chicken-and-egg: publish once by hand, then configure, then let CI take
+  over) - a 404 on npmjs is reported as exactly that, not as a raw status.
 - The SE signer shells out synchronously - the event loop stalls during the
   human's Touch ID think-time; engine polling resumes after. Fine by design.
 - **macOS only shows the Touch ID sheet for the FRONTMOST process**; a

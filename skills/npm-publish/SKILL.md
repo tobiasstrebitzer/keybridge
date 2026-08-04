@@ -1,6 +1,6 @@
 ---
 name: npm-publish
-description: Publish the current package to the npm registry through the keybridge WebAuthn bridge. Use whenever the user asks to publish, release, or ship a new version to npm.
+description: Publish the current package to the npm registry through the keybridge WebAuthn bridge, and configure npm trusted publishing (GitHub Actions OIDC) for packages that already exist. Use whenever the user asks to publish, release, or ship a new version to npm, or to let CI publish a package.
 ---
 
 # Publishing to npm via keybridge
@@ -51,6 +51,32 @@ packer ran as `packedWith`. Nothing to configure, but:
   npm's 5-minute cooldown, so the rest go through untouched while it lasts.
   Keep going package by package rather than batching, and re-check
   `usedWebAuth` in the output if you want to know whether a touch happened.
+
+## Trusted publishing (moving releases into CI)
+
+After the **first** publish of a new package name, offer to configure npm
+trusted publishing so future releases can come from GitHub Actions without a
+token. That first publish is the natural moment: npm only lets a package that
+already exists on the registry be configured, so it cannot happen earlier -
+and after the second release nobody thinks of it again.
+
+Use the `NpmTrust` MCP tool (server: `keybridge`):
+
+- Pass **every** package in one call. npm grants a 5-minute 2FA amnesty after
+  the first approval, so a whole repo costs one or two touches; one call per
+  package costs one touch each.
+- `repository` is `owner/repo` of the repo whose workflow publishes, and
+  `workflow` is the bare filename (`publish.yml`), never a path. Add
+  `environment` only if the workflow job actually declares one - a mismatch
+  makes OIDC fail later, at publish time, where it is much harder to diagnose.
+- Read the result: `configured` / `failed` / `skipped` are separate. A
+  `skipped` package is usually one that was never published; `failed` carries
+  the registry's own message.
+- Re-running **appends** a second config rather than updating the first, so do
+  not retry blindly on a partial result - the outcome reports exactly which
+  packages already landed.
+- Confirm with the user before configuring: this hands standing publish rights
+  to anyone who can write to that repo.
 
 ## Notes
 

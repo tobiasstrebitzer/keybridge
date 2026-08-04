@@ -4,6 +4,7 @@
 import { createAction } from '@silkweave/core'
 import { z } from 'zod/v4'
 import { accountsStatus } from '../accounts.ts'
+import { assertNpmVersion } from '../versions.ts'
 
 const input = z.object({
   registry: z.string().url()
@@ -48,6 +49,7 @@ export const NpmStatusAction = createAction({
   disposition: 'structured',
   annotations: { readOnlyHint: true },
   run: async ({ registry }) => {
+    await assertNpmVersion()
     const status = await accountsStatus({ registry })
     return {
       user: status.user,

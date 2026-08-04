@@ -24,7 +24,9 @@
   ],
   "packageManager": "pnpm@11.8.0",
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.18",
+    "npm": ">=12",
+    "pnpm": ">=11"
   },
   "bin": {
     "keybridge": "dist/cli.mjs",

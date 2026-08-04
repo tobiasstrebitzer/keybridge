@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'n
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { publishWithWebAuth, runNpm, PublishError, type StatusEvent } from '../src/engine.ts'
+import { publishedId, publishWithWebAuth, runNpm, PublishError, type StatusEvent } from '../src/engine.ts'
 import { startMockRegistry, OTP_TOKEN, SESSION_TOKEN } from './mock-registry.ts'
 
 // Keep the engine's persistent diagnostics (src/log.ts) out of the real
@@ -79,7 +79,7 @@ test('a pre-packed tarball is what gets published, ceremony and all', async (t) 
   })
 
   assert.equal(outcome.published, true)
-  assert.equal(outcome.result?.id, 'keybridge-e2e-fixture@1.0.0')
+  assert.equal(publishedId(outcome.result), 'keybridge-e2e-fixture@1.0.0')
   // Both attempts published the same tarball - the retry must not re-pack.
   assert.equal(registry.state.puts.length, 2)
   assert.equal(registry.state.puts[0]!.otp, null)

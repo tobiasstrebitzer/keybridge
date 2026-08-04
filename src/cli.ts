@@ -10,6 +10,8 @@
 //   keybridge open [url]            # surfaced keybridge window on the current account's profile
 //   keybridge token <ls|set|rm> [username] [token]   # per-account token vault
 //   keybridge publish [--user <name>] [--pm auto|npm|pnpm] [--] [npm publish args...]
+//   keybridge trust <pkg...> --repo owner/repo --file publish.yml   # GitHub Actions OIDC
+//   keybridge trust ls <pkg>        # existing trusted publishers (also 2FA-gated!)
 //   keybridge logs [n]              # tail the persistent ceremony diagnostics (~/.keybridge/logs)
 //
 // login/switch/publish also accept [--poll-timeout <sec>] [--presenter webkit|browser].
@@ -30,8 +32,10 @@ import {
   twoFactorMode, whoami, whoamiWithToken, type Mediation,
 } from './accounts.ts'
 import { deleteToken, getToken, listTokenMeta, saveToken } from './tokens.ts'
-import { packageId, publishWithWebAuth, resolveRegistry, runNpm, PublishError, type StatusEvent } from './engine.ts'
+import { packageId, publishedId, publishWithWebAuth, resolveRegistry, runNpm, PublishError, type StatusEvent } from './engine.ts'
 import { detectPackageManager, resolvePublishTarget, type PackageManagerChoice } from './pm.ts'
+import { listTrust, trustPackages, type TrustPermission } from './trust.ts'
+import { assertNpmVersion } from './versions.ts'
 import { defaultPresenterName, selectPresenter, type PresenterName } from './presenters/select.ts'
 import { openSurfacedShell, purgeWebStore } from './presenters/webkit.ts'
 import { latestLogFile } from './log.ts'
@@ -39,14 +43,33 @@ import { listCredentials, paths, stampUsername } from './signer.ts'
 import { runSetup } from './setup.ts'
 import { join } from 'node:path'
 
-const USAGE = 'usage: keybridge <setup|status|enroll|login|switch|logout|open|token|publish|logs> ' +
+const USAGE = 'usage: keybridge <setup|status|enroll|login|switch|logout|open|token|publish|trust|logs> ' +
   '[--user <name>] [--pm auto|npm|pnpm] [--poll-timeout <sec>] [--presenter webkit|browser] [--web] [--] [npm args...]'
+
+const TRUST_USAGE = [
+  'usage: keybridge trust <package...> --repo <owner/repo> --file <workflow.yml>',
+  '                       [--env <name>] [--allow-publish] [--allow-stage-publish]',
+  '                       [--user <npm-user>] [--registry <url>] [--dry-run]',
+  '       keybridge trust ls <package>',
+  '',
+  'Configures npm trusted publishing (GitHub Actions OIDC). Pass every package',
+  'at once: npm grants a 5-minute 2FA amnesty after the first approval, so a',
+  'whole repo usually costs one or two touches instead of one per package.',
+  'The package must already exist on the registry - publish it once first.',
+].join('\n')
 
 const [, , command, ...rest] = process.argv
 
 const fail = (message: string): never => {
   console.error(`✗ ${message}`)
   process.exit(1)
+}
+
+// npm >= 12 is a hard requirement for keybridge as a whole, not per command
+// (src/versions.ts explains why). `logs` is the one exception: reading the
+// local diagnostics must keep working precisely when something else is wrong.
+if (command !== 'logs') {
+  await assertNpmVersion().catch((e: unknown) => fail((e as Error).message))
 }
 
 if (command === 'setup') {
@@ -59,7 +82,7 @@ if (command === 'setup') {
 // command that needs the native helpers auto-runs setup when it never
 // happened on this machine (otherwise the signer would silently fall back to
 // the software backend, losing the Touch ID gate).
-if (['enroll', 'login', 'switch', 'open', 'publish'].includes(command ?? '') &&
+if (['enroll', 'login', 'switch', 'open', 'publish', 'trust'].includes(command ?? '') &&
     process.platform === 'darwin' && !existsSync(join(paths.KB_DIR, 'config.json'))) {
   console.error('· first run - setting up keybridge (compiling the native helpers) ...')
   runSetup()
@@ -209,6 +232,131 @@ if (command === 'open') {
   await shell.exited
   console.error('· window closed - if you changed npm accounts inside it, run `keybridge login` to re-sync')
   process.exit(0)
+}
+
+// trust: hand publish rights for a package to a GitHub Actions workflow. Every
+// write here is 2FA-gated by npm exactly like a publish, so it runs through the
+// same ceremony machinery - but over plain HTTP, because a spawned `npm trust`
+// can never complete the ceremony without a TTY (see src/trust.ts).
+if (command === 'trust') {
+  const packages: string[] = []
+  let repo: string | undefined
+  let file: string | undefined
+  let environment: string | undefined
+  let registryOverride: string | undefined
+  let trustUser: string | undefined
+  let trustPresenter: PresenterName | undefined
+  let trustPollTimeoutMs = 300_000
+  let dryRun = false
+  let list = false
+  const perms: TrustPermission[] = []
+
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!
+    if (a === '--help' || a === '-h') { console.error(TRUST_USAGE); process.exit(0) }
+    else if (a === 'ls' || a === 'list') list = true
+    else if (a === '--repo' || a === '--repository') repo = rest[++i]
+    else if (a.startsWith('--repo=') || a.startsWith('--repository=')) repo = a.split('=').slice(1).join('=')
+    else if (a === '--file' || a === '--workflow') file = rest[++i]
+    else if (a.startsWith('--file=') || a.startsWith('--workflow=')) file = a.split('=').slice(1).join('=')
+    else if (a === '--env' || a === '--environment') environment = rest[++i]
+    else if (a.startsWith('--env=') || a.startsWith('--environment=')) environment = a.split('=').slice(1).join('=')
+    else if (a === '--registry') registryOverride = rest[++i]
+    else if (a.startsWith('--registry=')) registryOverride = a.split('=').slice(1).join('=')
+    else if (a === '--user') trustUser = rest[++i]
+    else if (a.startsWith('--user=')) trustUser = a.split('=')[1]
+    else if (a === '--presenter') trustPresenter = rest[++i] as PresenterName
+    else if (a.startsWith('--presenter=')) trustPresenter = a.split('=')[1] as PresenterName
+    else if (a === '--poll-timeout') trustPollTimeoutMs = Number(rest[++i]) * 1000
+    else if (a.startsWith('--poll-timeout=')) trustPollTimeoutMs = Number(a.split('=')[1]) * 1000
+    else if (a === '--allow-publish') perms.push('publish')
+    else if (a === '--allow-stage-publish' || a === '--allow-staged-publish') perms.push('stage-publish')
+    else if (a === '--dry-run') dryRun = true
+    else if (a.startsWith('-')) fail(`unknown flag "${a}"\n${TRUST_USAGE}`)
+    else packages.push(a)
+  }
+  if (!Number.isFinite(trustPollTimeoutMs) || trustPollTimeoutMs <= 0) fail('--poll-timeout requires a positive number of seconds')
+  if (packages.length === 0) fail(`no package named\n${TRUST_USAGE}`)
+
+  // Identity: same contract as publish - whoami decides, a vault token can
+  // mediate for another account without disturbing the CLI session.
+  const identity = await resolvePublishIdentity({})
+  let actingUser = identity.user
+  let trustStoreId = identity.storeId
+  let trustMediation: Mediation | null = null
+  if (trustUser && identity.user !== trustUser) {
+    trustMediation = await resolveMediation(trustUser, {})
+    if (!trustMediation) {
+      fail(`npm is ${identity.user ? `logged in as "${identity.user}"` : 'logged out'} and no working token is stored for "${trustUser}" - run \`keybridge switch ${trustUser}\` first`)
+    }
+    actingUser = trustUser
+    trustStoreId = trustMediation!.storeId
+  }
+  const trustRegistry = registryOverride ?? trustMediation?.registry
+    ?? await resolveRegistry({}).catch(() => 'https://registry.npmjs.org/')
+  const trustPresenterName = trustPresenter ?? defaultPresenterName()
+  if (actingUser && trustPresenterName === 'webkit' && !dryRun) {
+    assertSecurityKeyFor(actingUser, trustRegistry)
+  }
+
+  const makePresenter = (pkg: string) => selectPresenter(trustPresenterName, {
+    webkit: {
+      storeId: trustStoreId,
+      ...(actingUser ? { prefillUsername: actingUser } : {}),
+      ceremonyContext: { pkg, ...(actingUser ? { user: actingUser } : {}) },
+    },
+  }).presenter
+
+  const trustStatus = ({ phase, authUrl, pkg }: StatusEvent) => {
+    if (phase === 'trust-attempt') console.error(`· configuring trusted publisher for ${pkg} ...`)
+    if (phase === 'awaiting-human') {
+      console.error(`· npm requires human verification to grant ${repo} publish rights to ${pkg}`)
+      console.error(`  ${authUrl}`)
+      console.error('  → touch your security key / Touch ID to approve')
+    }
+    if (phase === 'presenter-failed') console.error('⚠ the presenter failed - `keybridge logs` has the trace')
+    if (phase === 'trust-retry') console.error(`· verified - writing the trust config for ${pkg} ...`)
+  }
+
+  try {
+    if (list) {
+      for (const pkg of packages) {
+        const { configs } = await listTrust(pkg, {
+          registry: trustRegistry, presenter: makePresenter, onStatus: trustStatus,
+          pollTimeoutMs: trustPollTimeoutMs, ...(trustMediation ? { env: trustMediation.env } : {}),
+        })
+        console.log(`${pkg}:`)
+        if (configs.length === 0) console.log('  (no trusted publishers configured)')
+        for (const c of configs) {
+          console.log(`  ${c.id ?? '(no id)'}  ${c.type ?? '?'}  ${c.repository ?? '?'}  ${c.workflow ?? '?'}${c.environment ? `  env=${c.environment}` : ''}  [${c.permissions.join(', ')}]`)
+        }
+      }
+      process.exit(0)
+    }
+
+    if (!repo) fail(`--repo <owner/repo> is required\n${TRUST_USAGE}`)
+    if (!file) fail(`--file <workflow.yml> is required\n${TRUST_USAGE}`)
+    if (actingUser) console.error(`· configuring trusted publishing as ${actingUser}${trustMediation ? ' (via stored token)' : ''}`)
+
+    const outcome = await trustPackages({
+      packages, repository: repo!, workflow: file!, registry: trustRegistry,
+      ...(environment ? { environment } : {}),
+      ...(perms.length > 0 ? { permissions: perms } : {}),
+      ...(trustMediation ? { env: trustMediation.env } : {}),
+      dryRun, presenter: makePresenter, onStatus: trustStatus, pollTimeoutMs: trustPollTimeoutMs,
+    })
+
+    for (const c of outcome.configured) console.error(`✓ ${c.package} → ${repo}/.github/workflows/${file}  (id ${c.id})`)
+    for (const s of outcome.skipped) console.error(`· skipped ${s.package}: ${s.reason}`)
+    for (const f of outcome.failed) console.error(`✗ ${f.package}: ${f.reason}`)
+    console.error(`\nconfigured: ${outcome.configured.length} / failed: ${outcome.failed.length} / skipped: ${outcome.skipped.length}` +
+      (outcome.usedWebAuth ? ` - ${outcome.ceremonies} ${outcome.ceremonies === 1 ? 'ceremony' : 'ceremonies'}` : ''))
+    console.log(JSON.stringify(outcome, null, 2))
+    process.exit(outcome.failed.length > 0 ? 1 : 0)
+  } catch (e) {
+    if (e instanceof PublishError) fail(`${e.message} [${e.code}]`)
+    throw e
+  }
 }
 
 if (command !== 'publish' && command !== 'login' && command !== 'switch') {
@@ -366,7 +514,7 @@ try {
       // A mediated ceremony proved the profile belongs to that account - keep
       // the binding (without stealing the active pointer).
       if (mediation && outcome.usedWebAuth) bindAccount(mediation.user, storeId, { activate: false })
-      const id = outcome.result?.id ?? outcome.result?.name
+      const id = publishedId(outcome.result)
       if (!id) {
         // npm exited 0 without a publish result (e.g. a forwarded flag made it
         // print help) - do not claim success for a publish that never happened.

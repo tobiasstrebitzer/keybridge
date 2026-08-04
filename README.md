@@ -27,10 +27,17 @@ $ npx keybridge publish
 
 ## Quickstart
 
-Requires macOS with Node ≥ 22.18 and the Xcode Command Line Tools
+Requires macOS with Node ≥ 22.18, **npm ≥ 12** (`npm install -g npm@latest`;
+pnpm projects also need pnpm ≥ 11) and the Xcode Command Line Tools
 (`xcode-select --install`). The first two commands are one-time; the native
 helpers compile automatically on first use (`npx keybridge setup` runs it
 explicitly, and `npm install -g keybridge` works if you prefer a global bin).
+
+keybridge carries no compatibility shims for older package managers - an npm
+below 12 is refused up front with a message saying so, rather than
+half-working. (npm 12 is where `npm trust` exists, where `npm publish --json`
+settled into its current shape, and after the 11.9-11.14 releases that
+redacted the very auth URLs the ceremony needs.)
 
 ```sh
 npx keybridge login      # sign in to npmjs.com once, in the keybridge sheet
@@ -113,6 +120,10 @@ falls back to your default browser.
   real versions; npm then publishes that tarball. Publishing a workspace
   package with plain `npm publish` would ship the protocol strings verbatim
   and break every consumer.
+- **Trusted publishing, in bulk** - `keybridge trust` hands a GitHub Actions
+  workflow the right to publish your packages (npm's OIDC trusted publishers).
+  Every such write is 2FA-gated by npm, and a whole repo's worth of packages
+  usually costs one or two touches thanks to the same amnesty window.
 - **Agent-safe** - typed MCP tools with no flag injection, a hook that blocks
   raw `npm publish` in Bash, and fail-fast errors instead of silent hangs
   when something can't work.
@@ -127,6 +138,7 @@ keybridge login                      # just the web-login ceremony (~12 h sessio
 keybridge status                     # who am I, which accounts/keys/tokens exist
 keybridge publish --presenter browser  # force the default-browser fallback
 keybridge publish --pm npm           # override the detected package manager
+keybridge trust mypkg --repo me/repo --file publish.yml   # let CI publish it
 keybridge logs                       # tail the persistent ceremony diagnostics
 ```
 
@@ -151,6 +163,36 @@ first - `pnpm pack` cannot resolve `workspace:` without it.
 Publishing several packages in sequence needs only the first touch: the
 ceremony opts into npm's 5-minute cooldown, so follow-up publishes inside the
 window complete with no ceremony at all.
+
+### Trusted publishing (GitHub Actions OIDC)
+
+Once a package exists on the registry you can hand publishing to CI, so
+releases no longer need a token (or a human) at all:
+
+```sh
+keybridge trust mypkg @me/client @me/server \
+  --repo me/monorepo --file publish.yml      # one touch covers the whole set
+keybridge trust ls mypkg                     # what is configured today
+```
+
+`--env <name>` adds a GitHub environment claim, `--allow-stage-publish` grants
+staged publishing, `--dry-run` prints the exact request without sending it.
+
+Two things about npm's design are worth knowing:
+
+- **A package must already be published before it can be trusted.** Trusted
+  publishing is configured *on the package*, so a brand-new name cannot
+  bootstrap straight into CI: publish it once with keybridge, then configure
+  trust, then let CI take over. keybridge names this case explicitly instead
+  of surfacing a bare 404.
+- **Configs are appended, not replaced.** Re-running `keybridge trust` mints a
+  *second* config rather than updating the first - check `keybridge trust ls`
+  before re-running. (Removing one is `npm trust revoke <pkg> --id=<uuid>`.)
+
+Each write is 2FA-gated by npm exactly like a publish, and reads
+(`trust ls`) are gated too - there is no cheap way to check. Because the same
+5-minute amnesty applies, passing every package to one command is much cheaper
+than one command per package.
 
 Every ceremony stage (shell, page status, WebAuthn, Touch ID helper) appends
 structured diagnostics to `~/.keybridge/logs/` - `keybridge logs` tails them.
@@ -238,9 +280,11 @@ sees small structured results, never a browser.
 | `NpmSwitchAccount` | Change npm accounts (whoami-verified; instant when a stored token works; no-op when already correct). |
 | `NpmLogin` | Pre-authenticate the current/last-active account (~12 h session token). |
 | `NpmPublish` | The publish: `tag`, `access`, `dryRun`, `cwd`, and optional `user` to pin the account - mediated via that account's stored token when the CLI is someone else, failing fast otherwise. |
+| `NpmTrust` | Configure GitHub Actions trusted publishing for one or many packages (`packages`, `repository`, `workflow`, `environment`, `permissions`, `dryRun`, `user`). Bulk by design - one approval covers the set. |
 
 The agent flow when the target account matters:
-`NpmStatus` → (wrong user? `NpmSwitchAccount`) → `NpmPublish { user }`.
+`NpmStatus` → (wrong user? `NpmSwitchAccount`) → `NpmPublish { user }`, and
+`NpmTrust` afterwards to move future releases into CI.
 
 ## How it works
 

@@ -6,6 +6,7 @@ import { createAction, type Logger } from '@silkweave/core'
 import { z } from 'zod/v4'
 import { loginAs, whoami } from '../accounts.ts'
 import { PublishError, type StatusEvent } from '../engine.ts'
+import { assertNpmVersion } from '../versions.ts'
 
 const input = z.object({
   username: z.string().regex(/^[a-z0-9][a-z0-9._~-]*$/i)
@@ -38,6 +39,7 @@ export const NpmSwitchAccountAction = createAction({
   disposition: 'structured',
   annotations: { openWorldHint: true },
   run: async ({ username, registry }, context) => {
+    await assertNpmVersion()
     const previousUser = await whoami()
     if (previousUser === username) {
       return { user: username, previousUser, alreadyCurrent: true, usedStoredToken: false }

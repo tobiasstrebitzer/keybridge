@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 
 import { detectPackageManager, resolvePublishTarget } from '../src/pm.ts'
 import { PublishError } from '../src/engine.ts'
+import { MIN_PNPM_MAJOR, resetVersionChecks } from '../src/versions.ts'
 
 // Keep kblog() out of the real ~/.keybridge/logs while tests run.
 process.env.KEYBRIDGE_LOG_DIR = mkdtempSync(join(tmpdir(), 'keybridge-logs-'))
@@ -18,12 +19,19 @@ function writePkg (dir: string, pkg: Record<string, unknown>): void {
 }
 
 /** A stand-in `pnpm` on PATH, so the pack contract can be tested without a
- * real pnpm install (which needs a resolved workspace to pack at all). */
-function fakePnpm (body: string): { env: NodeJS.ProcessEnv } {
+ * real pnpm install (which needs a resolved workspace to pack at all).
+ * Answers `--version` first - keybridge gates the pack path on a pnpm version
+ * floor (src/versions.ts) before it packs anything. */
+function fakePnpm (body: string, version = '11.8.0'): { env: NodeJS.ProcessEnv } {
   const bin = scratch()
   const file = join(bin, 'pnpm')
-  writeFileSync(file, `#!/usr/bin/env node\n${body}\n`)
+  writeFileSync(file, [
+    '#!/usr/bin/env node',
+    `if (process.argv.includes('--version')) { console.log(${JSON.stringify(version)}); process.exit(0) }`,
+    body,
+  ].join('\n') + '\n')
   chmodSync(file, 0o755)
+  resetVersionChecks()
   return { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` } }
 }
 
@@ -110,6 +118,19 @@ test('a pnpm project is packed and the tarball is handed on, then cleaned up', a
   target.cleanup() // idempotent - callers run this from a finally
 })
 
+test('a pnpm below the floor is rejected before anything is packed', async () => {
+  // keybridge carries no compatibility shims: too old is an error, not a
+  // best-effort attempt that fails somewhere less legible.
+  const dir = scratch()
+  writePkg(dir, { name: 'x', version: '1.0.0', packageManager: 'pnpm@9.0.0' })
+  const fake = fakePnpm(PACKS_OK, `${MIN_PNPM_MAJOR - 1}.0.0`)
+  await assert.rejects(
+    resolvePublishTarget(dir, fake),
+    (e: unknown) => e instanceof PublishError && e.code === 'EVERSION' &&
+      new RegExp(`pnpm >= ${MIN_PNPM_MAJOR}`).test(e.message),
+  )
+})
+
 test('a prepack script writing to stdout does not lose the tarball', async () => {
   // pnpm forwards lifecycle-script output; anything on stdout corrupts the
   // --json payload, so the destination listing is the source of truth.
@@ -141,6 +162,10 @@ process.exit(1)
 test('a pnpm project with no pnpm on PATH fails instead of publishing workspace: deps', async () => {
   const dir = scratch()
   writePkg(dir, { name: 'x', version: '1.0.0', packageManager: 'pnpm@11.8.0' })
+  // A missing pnpm must explain WHY pnpm is required, not just report that
+  // the version probe could not run - regardless of whether an earlier check
+  // in this process already memoized a pnpm.
+  resetVersionChecks()
   await assert.rejects(
     resolvePublishTarget(dir, { env: { ...process.env, PATH: scratch() } }),
     (e: unknown) => e instanceof PublishError && e.code === 'EPACKMGR',

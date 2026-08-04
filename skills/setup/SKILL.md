@@ -26,6 +26,9 @@ Check, and tell the user what's missing rather than failing cryptically:
 
 - `uname` is `Darwin` - keybridge needs macOS (Secure Enclave + WKWebView).
 - `node --version` is >= 22.18 (native TypeScript execution).
+- `npm --version` is >= 12 - a hard requirement, keybridge refuses to run
+  below it. Have the user run `npm install -g npm@latest`. (pnpm projects
+  also need pnpm >= 11 for the pack path.)
 - `xcode-select -p` succeeds - otherwise have the user run
   `xcode-select --install` and wait for it to finish.
 

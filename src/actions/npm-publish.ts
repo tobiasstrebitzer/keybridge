@@ -13,10 +13,11 @@ import { createAction, type Logger, type SilkweaveContext } from '@silkweave/cor
 import { resolve, sep } from 'node:path'
 import { z } from 'zod/v4'
 import { assertSecurityKeyFor, bindAccount, bindAfterLogin, resolveMediation, resolvePublishIdentity, whoami, type Mediation } from '../accounts.ts'
-import { packageId, publishWithWebAuth, resolveRegistry, PublishError, type StatusEvent } from '../engine.ts'
+import { packageId, publishedId, publishWithWebAuth, resolveRegistry, PublishError, type StatusEvent } from '../engine.ts'
 import { currentLogFile, kblog } from '../log.ts'
 import { detectPackageManager, resolvePublishTarget } from '../pm.ts'
 import { selectPresenter } from '../presenters/select.ts'
+import { assertNpmVersion } from '../versions.ts'
 
 const PROJECT_ROOT = process.cwd()
 
@@ -91,6 +92,7 @@ export const NpmPublishAction = createAction({
   disposition: 'structured',
   annotations: { destructiveHint: false, openWorldHint: true },
   run: async ({ cwd: cwdInput, tag, access, dryRun, user: expectedUser, packageManager }, context) => {
+    await assertNpmVersion().catch(rethrow)
     kblog('tool', {
       tool: 'npm-publish', root: PROJECT_ROOT,
       cwd: cwdInput ?? null, tag: tag ?? null, dryRun: Boolean(dryRun), user: expectedUser ?? null,
@@ -183,7 +185,7 @@ export const NpmPublishAction = createAction({
 
       // npm can exit 0 without a publish result; mirror the CLI and never claim
       // a publish that has no package id to show for it.
-      const pkg = outcome.result?.id ?? outcome.result?.name ?? null
+      const pkg = publishedId(outcome.result)
       return {
         published: !dryRun && pkg !== null,
         dryRun: Boolean(dryRun),

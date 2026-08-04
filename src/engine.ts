@@ -36,17 +36,24 @@ export interface NpmRunResult {
   json: NpmJson | null
 }
 
-/** Gets the human to the WebAuthn ceremony; aborted via `signal` once done.
- * `purpose` says which ceremony this is - presenters use it to phrase the
- * approval prompt (e.g. the Touch ID reason line). */
-export type Presenter = (opts: { authUrl: string, signal: AbortSignal, purpose?: 'login' | 'publish' }) => Promise<unknown> | unknown
+/** Which ceremony a presenter is being asked to run - presenters use it to
+ * phrase the approval prompt (e.g. the Touch ID reason line). */
+export type CeremonyPurpose = 'login' | 'publish' | 'trust'
+
+/** Gets the human to the WebAuthn ceremony; aborted via `signal` once done. */
+export type Presenter = (opts: { authUrl: string, signal: AbortSignal, purpose?: CeremonyPurpose }) => Promise<unknown> | unknown
 
 export interface StatusEvent {
-  phase: 'publish-attempt' | 'login-required' | 'minting-session' | 'awaiting-human' | 'presenter-failed' | 'login-complete' | 'publish-retry'
+  phase:
+    | 'publish-attempt' | 'login-required' | 'minting-session' | 'awaiting-human'
+    | 'presenter-failed' | 'login-complete' | 'publish-retry'
+    | 'trust-attempt' | 'trust-retry'
   authUrl?: string
-  purpose?: 'login' | 'publish'
+  purpose?: CeremonyPurpose
   npmrc?: string
   code?: string
+  /** Package the event is about (trust configures one package per request). */
+  pkg?: string
 }
 
 export type OnStatus = (event: StatusEvent) => void
@@ -97,6 +104,26 @@ const parseJson = (text: string): NpmJson | null => {
   const i = trimmed.indexOf('{')
   if (i === -1) return null
   try { return JSON.parse(trimmed.slice(i)) } catch { return null }
+}
+
+/**
+ * The published package id out of `npm publish --json`.
+ *
+ * npm 12 keys the result by package name - `{ "<name>": { id, version, ... } }`
+ * (npm <= 11 answered flat, which is one of the reasons npm >= 12 is a hard
+ * requirement; see src/versions.ts). Reading `json.id` on npm 12 yields
+ * undefined, which made a successful publish report "npm exited without a
+ * publish result".
+ */
+export function publishedId (json: NpmJson | null): string | null {
+  if (!json) return null
+  for (const [key, value] of Object.entries(json)) {
+    if (key === 'error' || !value || typeof value !== 'object') continue
+    const entry = value as { id?: unknown, name?: unknown }
+    if (typeof entry.id === 'string') return entry.id
+    if (typeof entry.name === 'string') return entry.name
+  }
+  return null
 }
 
 /** "name@version" of the package in `cwd` - used to describe a publish in
@@ -331,18 +358,19 @@ export async function mintWebAuthSession (
 }
 
 /**
- * Race a presenter against doneUrl polling - the shared shape of the login
- * and publish ceremonies. Only a FATAL presenter failure aborts the poll: a
- * non-fatal one (e.g. the browser fallback failing to open) still leaves the
- * human able to complete the ceremony by visiting authUrl themselves. The
- * presenter is aborted (torn down) as soon as polling settles either way.
+ * Race a presenter against doneUrl polling - the shared shape of every
+ * keybridge ceremony (login, publish, trust). Only a FATAL presenter failure
+ * aborts the poll: a non-fatal one (e.g. the browser fallback failing to open)
+ * still leaves the human able to complete the ceremony by visiting authUrl
+ * themselves. The presenter is aborted (torn down) as soon as polling settles
+ * either way.
  */
-async function presentAndPoll (
+export async function presentAndPoll (
   presenter: Presenter,
   authUrl: string,
   doneUrl: string,
   { authToken, timeoutMs, fetchImpl, purpose, onStatus }:
-  { authToken?: string | null, timeoutMs: number, fetchImpl?: FetchLike, purpose?: 'login' | 'publish', onStatus?: OnStatus },
+  { authToken?: string | null, timeoutMs: number, fetchImpl?: FetchLike, purpose?: CeremonyPurpose, onStatus?: OnStatus },
 ): Promise<string> {
   const presenterAbort = new AbortController()
   const pollAbort = new AbortController()

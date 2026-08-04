@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
-import { PublishError, type Presenter } from '../engine.ts'
+import { PublishError, type CeremonyPurpose, type Presenter } from '../engine.ts'
 import { kblog } from '../log.ts'
 import { CAPTURE_SCRIPT, prefillScript, REARM_SCRIPT, STATUS_SCRIPT } from './shared.ts'
 import { handleCreate, handleGet, type CreateOptions, type GetOptions } from '../webauthn.ts'
@@ -47,17 +47,21 @@ export type WebAuthnResponder = (op: string, options: unknown, origin: string, r
 
 /** What this shell session is authorizing - feeds the Touch ID reason line. */
 export interface CeremonyContext {
-  /** package id being published, e.g. "keybridge@0.5.1" */
+  /** package id being published, e.g. "keybridge@0.5.1" (for a trust
+   * ceremony: the package whose trusted publisher is being configured) */
   pkg?: string
   /** npm account the ceremony runs as */
   user?: string
 }
 
 /** The Touch ID dialog renders “"KeyBridge" is trying to <this>.” */
-export function ceremonyReason (purpose: 'login' | 'publish' | undefined, ctx: CeremonyContext | undefined): string | undefined {
+export function ceremonyReason (purpose: CeremonyPurpose | undefined, ctx: CeremonyContext | undefined): string | undefined {
   const asUser = ctx?.user ? ` as ${ctx.user}` : ''
   if (purpose === 'publish') return `publish ${ctx?.pkg ?? 'a package'} to npm${asUser}`
   if (purpose === 'login') return `log in to npm${asUser}`
+  // A trust config hands publish rights to a CI workflow - the human is
+  // approving a standing grant, not one release. Say so.
+  if (purpose === 'trust') return `configure trusted publishing for ${ctx?.pkg ?? 'a package'} on npm${asUser}`
   return undefined
 }
 
